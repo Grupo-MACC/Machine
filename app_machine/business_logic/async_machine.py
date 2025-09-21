@@ -212,14 +212,21 @@ class Machine:
                 )
                 response.raise_for_status()
                 db_order = response.json()
+                '''db_order = Order(
+                    id = data["id"],
+                    number_of_pieces = data["number_of_pieces"]
+                )'''
+                pieces = db_order["pieces"]
+
         except httpx.HTTPError as exc:
             logger.error("")
         if not db_order:  # Just in case order has been removed
             return False
         
         try:
-            for piece in db_order.pieces:
-                if piece.status != Piece.STATUS_MANUFACTURED:
+            #for piece in db_order.pieces:
+            for piece in pieces:
+                if piece["status"] != Piece.STATUS_MANUFACTURED:
                     return False
         except Exception as exc:
             print(exc)
@@ -257,11 +264,11 @@ class Machine:
 
     async def remove_piece_from_queue(self, piece) -> bool:
         """Removes the given piece from the queue."""
-        logger.info("Removing piece %i", piece.id)
-        if self.working_piece == piece.id:
+        logger.info("Removing piece %i", piece)
+        if self.working_piece == piece:
             logger.warning(
                 "Piece %i is being manufactured, cannot remove from queue\n\n",
-                piece.id
+                piece
             )
             return False
 
@@ -273,14 +280,14 @@ class Machine:
 
         # Fill the list with all items but *piece_id*
         for item in item_list:
-            if item != piece.id:
+            if item != piece:
                 self.__manufacturing_queue.put_nowait(item)
             else:
-                logging.debug("Piece %i removed from queue.", piece.id)
+                logging.debug("Piece %i removed from queue.", piece)
                 removed = True
 
         if not removed:
-            logger.warning("Piece %i not found in the queue.", piece.id)
+            logger.warning("Piece %i not found in the queue.", piece)
 
         return removed
 

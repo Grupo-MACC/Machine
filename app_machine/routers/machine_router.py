@@ -3,7 +3,7 @@
 import logging
 import httpx
 from typing import List
-from fastapi import APIRouter, Depends, status, HTTPException, Body
+from fastapi import APIRouter, Depends, status, Body, Query
 from sqlalchemy.ext.asyncio import AsyncSession
 from business_logic.async_machine import Machine
 from dependencies import get_machine
@@ -24,6 +24,14 @@ async def health_check():
     return {
         "detail": "OK"
     }
+
+@router.get(
+        "/machine/status"
+)
+async def get_machine_status(
+    machine: Machine = Depends(get_machine)
+):
+    return machine.status
 
 @router.post(
     "/add_pieces_to_queue",
@@ -77,13 +85,13 @@ async def add_pieces_to_queue(
     response_description="Pieces successfully removed from the queue."
 )
 async def remove_pieces_from_queue(
-    pieces: List[schemas.Piece],
+    piece_ids: List[int] = Query(...),
     machine: Machine = Depends(get_machine)
 ):
-    logger.info("Request received to remove %d piece(s) from machine queue.", len(pieces))
+    logger.info("Request received to remove %d piece(s) from machine queue.", len(piece_ids))
 
     try:
-        await machine.remove_pieces_from_queue(pieces=pieces)
+        await machine.remove_pieces_from_queue(pieces=piece_ids)
         return True
     except Exception as e:
         logger.error("Error while removing pieces from queue: %s", str(e))

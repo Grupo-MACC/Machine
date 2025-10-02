@@ -193,10 +193,13 @@ class Machine:
         if await Machine.is_order_finished(self.working_piece['order_id']):
             try:
                 async with httpx.AsyncClient() as client:
+                    url = f"{ORDER_SERVICE_URL}/update_order_status/{self.working_piece['order_id']}"
+                    
                     response = await client.put(
-                        f"{ORDER_SERVICE_URL}/update_order_status/{self.working_piece['order_id']}",
-                        json={"status": Order.STATUS_FINISHED}
+                        url,
+                        params={"status": Order.STATUS_FINISHED}
                     )
+                    print(self.working_piece['order_id'],"order finished")
             except httpx.HTTPError as exc:
                 print(exc)
             except Exception as exc:

@@ -6,7 +6,7 @@ import httpx
 from random import randint
 from sqlalchemy.ext.asyncio import AsyncSession
 from sqlalchemy.exc import ProgrammingError, OperationalError
-from sql.models import Piece, Order
+from sql.models import Piece
 from routers.router_utils import ORDER_SERVICE_URL
 
 logger = logging.getLogger(__name__)
@@ -163,7 +163,7 @@ class Machine:
                     manufacturing_date=data["manufacturing_date"],
                     status=data["status"],
                     order_id=data["order"]["id"] if data.get("order") else None,
-)
+                )
                 if piece:
                     self.working_piece = piece.as_dict()
                     logger.info("Piece %i status updated to manufactured via service.", self.working_piece['id'])
@@ -197,7 +197,7 @@ class Machine:
                     
                     response = await client.put(
                         url,
-                        params={"status": Order.STATUS_FINISHED}
+                        params={"status": "Finished"}
                     )
                     print(self.working_piece['order_id'],"order finished")
             except httpx.HTTPError as exc:

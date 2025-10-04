@@ -7,6 +7,7 @@ import uvicorn
 from fastapi import FastAPI
 from routers import machine_router
 from sql import models
+from sql import database
 # Configure logging ################################################################################
 logging.config.fileConfig(os.path.join(os.path.dirname(__file__), "logging.ini"))
 logger = logging.getLogger(__name__)

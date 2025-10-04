@@ -34,7 +34,7 @@ async def get_machine_status(
     return machine.status
 
 @router.post(
-    "/add_pieces_to_queue",
+    "/machine/add_pieces_to_queue",
     status_code=status.HTTP_201_CREATED,
     summary="Add pieces to machine queue",
     response_description="Pieces successfully added to the queue."

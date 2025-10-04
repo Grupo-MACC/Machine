@@ -44,7 +44,6 @@ async def add_pieces_to_queue(
     machine: Machine = Depends(get_machine)
 ):
     pieces_obj = []
-    print("aaaaaaa")
 
     try:
         async with httpx.AsyncClient(timeout=10.0) as client:  # Un solo cliente para todo el loop

@@ -8,6 +8,7 @@ from sqlalchemy.ext.asyncio import AsyncSession
 from sqlalchemy.exc import ProgrammingError, OperationalError
 from sql.models import Piece
 from routers.router_utils import ORDER_SERVICE_URL
+from broker.machine_broker_service import publish_machine_job_started, publish_machine_job_completed, publish_machine_job_failed
 
 logger = logging.getLogger(__name__)
 logger.debug("Machine logger set.")
@@ -93,16 +94,33 @@ class Machine:
 
     async def create_piece(self, piece_id: int):
         """Simulates piece manufacturing."""
-        # Machine and piece status updated during manufacturing
-        print("aaaaaaaaaaaaaaa")
-        await self.update_working_piece(piece_id)
-        await self.working_piece_to_manufacturing()  # Update Machine&piece status
+        try:
+            # 1) Cargar y pasar a MANUFACTURING
+            await self.update_working_piece(piece_id)
+            await self.working_piece_to_manufacturing()  # Update Machine & piece status
 
-        await asyncio.sleep(randint(5, 20))  # Simulates time spent manufacturing
+            # 2) Publicar STARTED (usa order_id y la pieza actual)
+            order_id = self.working_piece["order_id"]
+            piece_ids = [self.working_piece["id"]]
+            await publish_machine_job_started(order_id, piece_ids, correlation_id=None)
 
-        await self.working_piece_to_finished()  # Update Machine&Piece status
+            # 3) Simular tiempo de fabricación
+            await asyncio.sleep(randint(5, 20))
 
-        self.working_piece = None
+            # 4) Terminar (esto publicará COMPLETED en otro método)
+            await self.working_piece_to_finished()  # Update Machine & Piece status
+        except Exception as e:
+            # Si algo peta en cualquier punto, mandamos FAILED
+            try:
+                order_id = (self.working_piece or {}).get("order_id", None)
+                if order_id is not None:
+                    await publish_machine_job_failed(order_id, str(e), correlation_id=None)
+            finally:
+                # re-levanta o deja el error logueado según prefieras
+                logger.exception("Error manufacturing piece %s: %s", piece_id, e)
+        finally:
+            self.working_piece = None
+
 
     async def update_working_piece(self, piece_id: int):
         """Loads a piece for the given id and updates the working piece."""
@@ -204,6 +222,14 @@ class Machine:
                 print(exc)
             except Exception as exc:
                 print(exc)
+                
+        # Publicar COMPLETED
+        try:
+            order_id = self.working_piece["order_id"]
+            piece_ids = [self.working_piece["id"]]
+            await publish_machine_job_completed(order_id, piece_ids, correlation_id=None)
+        except Exception as pub_exc:
+            logger.exception("Could not publish machine.job.completed: %s", pub_exc)
 
     @staticmethod
     async def is_order_finished(order_id):

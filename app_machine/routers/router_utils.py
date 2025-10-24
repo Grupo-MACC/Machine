@@ -3,8 +3,8 @@
 import logging
 from fastapi import HTTPException
 
-#ORDER_SERVICE_URL = "http://order:5000"
-ORDER_SERVICE_URL = "http://localhost:5000"
+ORDER_SERVICE_URL = "http://order:5000"
+#ORDER_SERVICE_URL = "http://localhost:5000"
 
 logger = logging.getLogger(__name__)
 

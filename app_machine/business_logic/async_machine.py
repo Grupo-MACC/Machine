@@ -130,7 +130,7 @@ class Machine:
     async def working_piece_to_manufacturing(self):
         from broker.machine_broker_service import publish_message
         """Updates piece status to manufacturing."""
-        if self.working_piece["status"] != Piece.STATUS_MANUFACTURING:
+        if self.working_piece["status"] not in [Piece.STATUS_MANUFACTURING, Piece.STATUS_MANUFACTURED]:
             try:
                 piece_id = self.working_piece["id"]
                 status = Piece.STATUS_MANUFACTURING
@@ -157,7 +157,7 @@ class Machine:
 
         """Updates piece status to finished and order if all pieces are finished."""
         logger.debug("Working piece finished.")
-        self.status = Machine.STATUS_CHANGING_PIECE 
+        self.status = Machine.STATUS_CHANGING_PIECE
         """Updates piece status to manufacturing."""
         try:
             piece_id = self.working_piece["id"]
@@ -179,7 +179,26 @@ class Machine:
 
         except Exception as exc:
             print(f"❌ Error publicando actualización de pieza en RabbitMQ: {exc}")
+        try:
+            piece_id = self.working_piece["id"]
 
+            # ✅ Estructura del mensaje
+            message = {
+                "piece_id": piece_id
+            }
+
+            # ✅ Publicar en el topic correspondiente
+            await publish_message(
+                topic="piece.date",
+                message=message,
+            )
+
+            logger.info(f"📤 Mensaje publicado en 'piece.date': pieza {piece_id} -> update_date_to_now")
+            print(f"📤 Mensaje publicado en 'piece.date': pieza {piece_id} -> update_date_to_now")
+        except Exception as exc:
+            print(f"❌ Error publicando mensaje en 'piece.date': {exc}")
+
+        '''
         try:
             async with httpx.AsyncClient() as client:
                 response = await client.put(
@@ -199,6 +218,7 @@ class Machine:
             print(exc)
         except Exception as exc:
             print(exc)
+        '''
 
         if await Machine.is_order_finished(self.working_piece['order_id']):
             try:

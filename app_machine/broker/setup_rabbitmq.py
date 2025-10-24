@@ -1,6 +1,6 @@
 from aio_pika import connect_robust, ExchangeType
 
-RABBITMQ_HOST = "amqp://guest:guest@localhost/"
+RABBITMQ_HOST = "amqp://guest:guest@rabbitmq/"
 ORDER_PAYMENT_EXCHANGE_NAME = "order_payment_exchange"
 AUTH_RUNNING_EXCHANGE_NAME = "auth_active_exchange"
 EXCHANGE_NAME = "order_payment_exchange"

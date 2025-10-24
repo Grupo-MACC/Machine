@@ -16,7 +16,3 @@ async def get_machine():
         from business_logic.async_machine import Machine
         MY_MACHINE = await Machine.create()
     return MY_MACHINE
-
-
-# asyncio.create_task(get_machine())
-# asyncio.run(init_machine())

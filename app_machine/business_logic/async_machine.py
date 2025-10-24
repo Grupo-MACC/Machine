@@ -8,7 +8,7 @@ from sqlalchemy.ext.asyncio import AsyncSession
 from sqlalchemy.exc import ProgrammingError, OperationalError
 from sql.models import Piece
 from routers.router_utils import ORDER_SERVICE_URL
-from broker.machine_broker_service import publish_machine_job_started, publish_machine_job_completed, publish_machine_job_failed
+#from broker.machine_broker_service import publish_message
 
 logger = logging.getLogger(__name__)
 logger.debug("Machine logger set.")
@@ -94,32 +94,15 @@ class Machine:
 
     async def create_piece(self, piece_id: int):
         """Simulates piece manufacturing."""
-        try:
-            # 1) Cargar y pasar a MANUFACTURING
-            await self.update_working_piece(piece_id)
-            await self.working_piece_to_manufacturing()  # Update Machine & piece status
+        # Machine and piece status updated during manufacturing
+        await self.update_working_piece(piece_id)
+        await self.working_piece_to_manufacturing()  # Update Machine&piece status
 
-            # 2) Publicar STARTED (usa order_id y la pieza actual)
-            order_id = self.working_piece["order_id"]
-            piece_ids = [self.working_piece["id"]]
-            await publish_machine_job_started(order_id, piece_ids, correlation_id=None)
+        await asyncio.sleep(randint(5, 20))  # Simulates time spent manufacturing
 
-            # 3) Simular tiempo de fabricación
-            await asyncio.sleep(randint(5, 20))
+        await self.working_piece_to_finished()  # Update Machine&Piece status
 
-            # 4) Terminar (esto publicará COMPLETED en otro método)
-            await self.working_piece_to_finished()  # Update Machine & Piece status
-        except Exception as e:
-            # Si algo peta en cualquier punto, mandamos FAILED
-            try:
-                order_id = (self.working_piece or {}).get("order_id", None)
-                if order_id is not None:
-                    await publish_machine_job_failed(order_id, str(e), correlation_id=None)
-            finally:
-                # re-levanta o deja el error logueado según prefieras
-                logger.exception("Error manufacturing piece %s: %s", piece_id, e)
-        finally:
-            self.working_piece = None
+        self.working_piece = None
 
 
     async def update_working_piece(self, piece_id: int):
@@ -146,48 +129,77 @@ class Machine:
             print(exc)
 
     async def working_piece_to_manufacturing(self):
+        from broker.machine_broker_service import publish_message
         """Updates piece status to manufacturing."""
-        self.status = Machine.STATUS_WORKING
-        try:
-            async with httpx.AsyncClient() as client:
-                response = await client.put(
-                    f"{ORDER_SERVICE_URL}/update_piece_status/{self.working_piece['id']}",
-                    json=Piece.STATUS_MANUFACTURING
+        if self.working_piece["status"] not in [Piece.STATUS_MANUFACTURING, Piece.STATUS_MANUFACTURED]:
+            try:
+                piece_id = self.working_piece["id"]
+                status = Piece.STATUS_MANUFACTURING
+
+                # ✅ Estructura del mensaje a publicar
+                message = {
+                    "piece_id": piece_id,
+                    "status": status,
+                }
+
+                # ✅ Publicar en RabbitMQ
+                await publish_message(
+                    topic="piece.done",
+                    message=message,
                 )
-                response.raise_for_status()
-                answer = response.json()
-                if answer:
-                    print("Piece %i status updated to manufacturing via service.", self.working_piece['id'])
-        except httpx.HTTPError as exc:
-            print("Could not update working piece status to manufacturing: %s", exc) 
-        except Exception as exc:
-            print(exc)
+
+                print(f"📦 Mensaje publicado en 'piece.done': pieza {piece_id} -> {status}")
+
+            except Exception as exc:
+                print(f"❌ Error publicando actualización de pieza en RabbitMQ: {exc}")
 
     async def working_piece_to_finished(self):
+        from broker.machine_broker_service import publish_message
+
         """Updates piece status to finished and order if all pieces are finished."""
         logger.debug("Working piece finished.")
         self.status = Machine.STATUS_CHANGING_PIECE
-
+        """Updates piece status to manufacturing."""
         try:
-            async with httpx.AsyncClient() as client:
-                response = await client.put(
-                    f"{ORDER_SERVICE_URL}/update_piece_status/{self.working_piece['id']}",
-                    json=Piece.STATUS_MANUFACTURED
-                )
-                response.raise_for_status()
-                data = response.json()
-                piece = Piece(
-                    id=data["id"],
-                    manufacturing_date=data["manufacturing_date"],
-                    status=data["status"],
-                    order_id=data["order"]["id"] if data.get("order") else None,
-                )
-                if piece:
-                    self.working_piece = piece.as_dict()
-                    logger.info("Piece %i status updated to manufactured via service.", self.working_piece['id'])
-        except httpx.HTTPError as exc:
-            logger.error("Could not update working piece status to manufactured: %s", exc) 
-        
+            piece_id = self.working_piece["id"]
+            status = Piece.STATUS_MANUFACTURED
+
+            # ✅ Estructura del mensaje a publicar
+            message = {
+                "piece_id": piece_id,
+                "status": status,
+            }
+
+            # ✅ Publicar en RabbitMQ
+            await publish_message(
+                topic="piece.done",
+                message=message,
+            )
+
+            print(f"📦 Mensaje publicado en 'piece.done': pieza {piece_id} -> {status}")
+
+        except Exception as exc:
+            print(f"❌ Error publicando actualización de pieza en RabbitMQ: {exc}")
+        try:
+            piece_id = self.working_piece["id"]
+
+            # ✅ Estructura del mensaje
+            message = {
+                "piece_id": piece_id
+            }
+
+            # ✅ Publicar en el topic correspondiente
+            await publish_message(
+                topic="piece.date",
+                message=message,
+            )
+
+            logger.info(f"📤 Mensaje publicado en 'piece.date': pieza {piece_id} -> update_date_to_now")
+            print(f"📤 Mensaje publicado en 'piece.date': pieza {piece_id} -> update_date_to_now")
+        except Exception as exc:
+            print(f"❌ Error publicando mensaje en 'piece.date': {exc}")
+
+        '''
         try:
             async with httpx.AsyncClient() as client:
                 response = await client.put(
@@ -207,29 +219,23 @@ class Machine:
             print(exc)
         except Exception as exc:
             print(exc)
+        '''
 
         if await Machine.is_order_finished(self.working_piece['order_id']):
             try:
-                async with httpx.AsyncClient() as client:
-                    url = f"{ORDER_SERVICE_URL}/update_order_status/{self.working_piece['order_id']}"
-                    
-                    response = await client.put(
-                        url,
-                        params={"status": "Finished"}
-                    )
-                    print(self.working_piece['order_id'],"order finished")
-            except httpx.HTTPError as exc:
-                print(exc)
+
+                # ✅ Estructura del mensaje a publicar
+                message = {
+                    "order_id": self.working_piece['order_id'],
+                }
+
+                # ✅ Publicar en RabbitMQ
+                await publish_message(
+                    topic="order.ready",
+                    message=message,
+                )
             except Exception as exc:
-                print(exc)
-                
-        # Publicar COMPLETED
-        try:
-            order_id = self.working_piece["order_id"]
-            piece_ids = [self.working_piece["id"]]
-            await publish_machine_job_completed(order_id, piece_ids, correlation_id=None)
-        except Exception as pub_exc:
-            logger.exception("Could not publish machine.job.completed: %s", pub_exc)
+                print(f"❌ Error publicando actualización de pieza en RabbitMQ: {exc}")
 
     @staticmethod
     async def is_order_finished(order_id):

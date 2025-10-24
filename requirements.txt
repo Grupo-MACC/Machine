@@ -9,5 +9,6 @@ coloredlogs~=15.0
 PyYAML~=6.0
 requests~=2.32.4
 httpx
+PyJWT
 aio_pika
-microservice-chassis-grupo2
+microservice-chassis-grupo2==0.1.6

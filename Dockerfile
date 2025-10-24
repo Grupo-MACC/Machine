@@ -29,4 +29,4 @@ USER 1000
 COPY app_machine /home/pyuser/code/app_machine
 
 # Run the application
-ENTRYPOINT ["./entrypoint.sh"]
+ENTRYPOINT ["/home/pyuser/code/entrypoint.sh"]

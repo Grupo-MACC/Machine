@@ -48,7 +48,7 @@ async def consume_auth_events():
     
     exchange = await declare_exchange(channel)
     
-    machine_queue = await channel.declare_queue('delivery_queue', durable=True)
+    machine_queue = await channel.declare_queue('machine_queue', durable=True)
     await machine_queue.bind(exchange, routing_key="auth.running")
     await machine_queue.bind(exchange, routing_key="auth.not_running")
     

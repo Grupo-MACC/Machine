@@ -11,7 +11,8 @@ RUN pip install -r /requirements.txt
 # We will be working on this folder
 WORKDIR /home/pyuser/code
 ENV PYTHONPATH=/home/pyuser/code/app_machine
-
+ENV RABBITMQ_USER=guest
+ENV RABBITMQ_PASSWORD=guest
 
 # Create a non root user
 RUN useradd -u 1000 -d /home/pyuser -m pyuser && \
@@ -28,6 +29,4 @@ USER 1000
 COPY app_machine /home/pyuser/code/app_machine
 
 # Run the application
-ENTRYPOINT ["/home/pyuser/code/entrypoint.sh"]
-
-
+ENTRYPOINT ["./entrypoint.sh"]

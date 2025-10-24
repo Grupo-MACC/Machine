@@ -8,8 +8,6 @@ import asyncio
 from fastapi import FastAPI
 from broker import setup_rabbitmq, machine_broker_service
 from routers import machine_router
-from sql import models
-from sql import database
 # Configure logging ################################################################################
 logging.config.fileConfig(os.path.join(os.path.dirname(__file__), "logging.ini"))
 logger = logging.getLogger(__name__)
@@ -21,28 +19,19 @@ async def lifespan(__app: FastAPI):
     """Lifespan context manager."""
     try:
         logger.info("Starting up")
-        try:
-            logger.info("Creating database tables")
-            async with database.engine.begin() as conn:
-                await conn.run_sync(models.Base.metadata.create_all)
-        except Exception:
-            logger.error(
-                "Could not create tables at startup",
-            )
-        try:
+        '''try:
             await setup_rabbitmq.setup_rabbitmq()
         except Exception as e:
-            logger.error(f"Error configurando RabbitMQ: {e}")
+            logger.error(f"Error configurando RabbitMQ: {e}")'''
         try:
             task_machine = asyncio.create_task(machine_broker_service.consume_do_pieces_events())
-            #task_auth = asyncio.create_task(order_broker_service.consume_auth_events())
+            task_auth = asyncio.create_task(machine_broker_service.consume_auth_events())
         except Exception as e:
             logger.error(f"Error lanzando payment broker service: {e}")
         yield
     finally:
-        logger.info("Shutting down database")
-        await database.engine.dispose()
         task_machine.cancel()
+        task_auth.cancel()
 
 # OpenAPI Documentation ############################################################################
 APP_VERSION = os.getenv("APP_VERSION", "2.0.0")

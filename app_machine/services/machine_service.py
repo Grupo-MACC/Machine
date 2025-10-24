@@ -1,19 +1,14 @@
 import logging
 import httpx
 from typing import List
-from fastapi import APIRouter, Depends, status, Body, Query
-from sqlalchemy.ext.asyncio import AsyncSession
-from business_logic.async_machine import Machine
 from dependencies import get_machine
 from sql import schemas
-from routers.router_utils import raise_and_log_error, ORDER_SERVICE_URL
+from microservice_chassis_grupo2.core.router_utils import ORDER_SERVICE_URL
 
 logger = logging.getLogger(__name__)
-router = APIRouter()
-
 
 async def add_pieces_to_queue(
-    pieces: List[str] = Body(...),
+    pieces: List[str],
 ):
     pieces_obj = []
     machine = await get_machine()
@@ -22,7 +17,7 @@ async def add_pieces_to_queue(
         async with httpx.AsyncClient(timeout=10.0) as client:  # Un solo cliente para todo el loop
             for piece_id in pieces:
                 try:
-                    response = await client.get(f"{ORDER_SERVICE_URL}/piece/{piece_id}")
+                    response = await client.get(f"{ORDER_SERVICE_URL}/private/piece/{piece_id}")
                     response.raise_for_status()
                     piece_data = response.json()
 

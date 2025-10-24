@@ -10,3 +10,4 @@ PyYAML~=6.0
 requests~=2.32.4
 httpx
 aio_pika
+microservice-chassis-grupo2

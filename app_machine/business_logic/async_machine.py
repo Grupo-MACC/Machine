@@ -4,11 +4,9 @@ import asyncio
 import logging
 import httpx
 from random import randint
-from sqlalchemy.ext.asyncio import AsyncSession
 from sqlalchemy.exc import ProgrammingError, OperationalError
 from sql.models import Piece
-from routers.router_utils import ORDER_SERVICE_URL
-#from broker.machine_broker_service import publish_message
+from microservice_chassis_grupo2.core.router_utils import ORDER_SERVICE_URL
 
 logger = logging.getLogger(__name__)
 logger.debug("Machine logger set.")
@@ -52,7 +50,7 @@ class Machine:
         try:
             async with httpx.AsyncClient() as client:
                 response = await client.get(
-                    f"{ORDER_SERVICE_URL}/piece_status/{Piece.STATUS_MANUFACTURING}"
+                    f"{ORDER_SERVICE_URL}/private/piece_status/{Piece.STATUS_MANUFACTURING}"
                 )
                 response.raise_for_status()
                 manufacturing_pieces = response.json()
@@ -72,7 +70,7 @@ class Machine:
         try:
             async with httpx.AsyncClient() as client:
                 response = await client.get(
-                    f"{ORDER_SERVICE_URL}/piece_status/{Piece.STATUS_QUEUED}"
+                    f"{ORDER_SERVICE_URL}/private/piece_status/{Piece.STATUS_QUEUED}"
                 )
                 response.raise_for_status()
                 queued_pieces = response.json()
@@ -111,7 +109,7 @@ class Machine:
         try:
             async with httpx.AsyncClient() as client:
                 response = await client.get(
-                    f"{ORDER_SERVICE_URL}/piece/{piece_id}"
+                    f"{ORDER_SERVICE_URL}/private/piece/{piece_id}"
                 )
                 response.raise_for_status()
                 data = response.json()
@@ -199,28 +197,6 @@ class Machine:
         except Exception as exc:
             print(f"❌ Error publicando mensaje en 'piece.date': {exc}")
 
-        '''
-        try:
-            async with httpx.AsyncClient() as client:
-                response = await client.put(
-                    f"{ORDER_SERVICE_URL}/update_piece_manufacturing_date_to_now/{self.working_piece['id']}"
-                )
-                response.raise_for_status()
-                data = response.json()
-                piece = Piece(
-                    id=data["id"],
-                    manufacturing_date=data["manufacturing_date"],
-                    status=data["status"],
-                    order_id=data["order"]["id"] if data.get("order") else None,
-)
-                if piece:
-                    self.working_piece = piece.as_dict()
-        except httpx.HTTPError as exc:
-            print(exc)
-        except Exception as exc:
-            print(exc)
-        '''
-
         if await Machine.is_order_finished(self.working_piece['order_id']):
             try:
 
@@ -243,7 +219,7 @@ class Machine:
         try:
             async with httpx.AsyncClient() as client:
                 response = await client.get(
-                    f"{ORDER_SERVICE_URL}/order/{order_id}"
+                    f"{ORDER_SERVICE_URL}/private/order/{order_id}"
                 )
                 response.raise_for_status()
                 db_order = response.json()

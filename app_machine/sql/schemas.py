@@ -1,7 +1,7 @@
 # -*- coding: utf-8 -*-
 """Classes for Request/Response schema definitions."""
 # pylint: disable=too-few-public-methods
-from typing import List, Optional
+from typing import Optional
 from datetime import datetime
 from pydantic import BaseModel, Field, ConfigDict  # pylint: disable=no-name-in-module
 
@@ -9,7 +9,6 @@ from pydantic import BaseModel, Field, ConfigDict  # pylint: disable=no-name-in-
 class Message(BaseModel):
     """Message schema definition."""
     detail: Optional[str] = Field(example="error or success message")
-
 
 class OrderBase(BaseModel):
     """Order base schema definition."""
@@ -23,8 +22,6 @@ class OrderBase(BaseModel):
         default="No description",
         example="CompanyX order on 2022-01-20"
     )
-
-    #  pieces = relationship("Piece", lazy="joined")
 
 
 class Order(OrderBase):
@@ -67,21 +64,3 @@ class Piece(PieceBase):
     """Piece schema definition."""
     model_config = ConfigDict(from_attributes=True)  # ORM mode ON
     order: Optional[Order] = Field(description="Order where the piece belongs to")
-
-    #class Config:
-    #    """ORM configuration."""
-    #    orm_mode = True
-
-
-#class MachineStatusResponse(BaseModel):
-#    """machine status schema definition."""
-#    status: str = Field(
-#        description="Machine's current status",
-#        default=None,
-#        example="Waiting"
-#    )
-#    working_piece: Optional[int] = Field(
-#        description="Current working piece id. None if not working piece.",
-#        example=1
-#    )
-#    queue: List[int] = Field(description="Queued piece ids")

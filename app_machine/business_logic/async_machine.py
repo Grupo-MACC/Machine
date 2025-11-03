@@ -48,7 +48,10 @@ class Machine:
     async def get_manufacturing_piece():
         """Gets the manufacturing piece from the database."""
         try:
-            async with httpx.AsyncClient() as client:
+            async with httpx.AsyncClient(
+                    verify="/certs/ca.pem",
+                    cert=("/certs/machine/machine-cert.pem", "/certs/machine/machine-key.pem"),
+                    ) as client:
                 response = await client.get(
                     f"{ORDER_SERVICE_URL}/private/piece_status/{Piece.STATUS_MANUFACTURING}"
                 )
@@ -68,7 +71,10 @@ class Machine:
     async def get_queued_pieces():
         """Get all queued pieces from the database."""
         try:
-            async with httpx.AsyncClient() as client:
+            async with httpx.AsyncClient(
+                    verify="/certs/ca.pem",
+                    cert=("/certs/machine/machine-cert.pem", "/certs/machine/machine-key.pem"),
+                    ) as client:
                 response = await client.get(
                     f"{ORDER_SERVICE_URL}/private/piece_status/{Piece.STATUS_QUEUED}"
                 )
@@ -107,7 +113,10 @@ class Machine:
         """Loads a piece for the given id and updates the working piece."""
         logger.debug("Updating working piece to %i", piece_id)
         try:
-            async with httpx.AsyncClient() as client:
+            async with httpx.AsyncClient(
+                    verify="/certs/ca.pem",
+                    cert=("/certs/machine/machine-cert.pem", "/certs/machine/machine-key.pem"),
+                    ) as client:
                 response = await client.get(
                     f"{ORDER_SERVICE_URL}/private/piece/{piece_id}"
                 )
@@ -118,8 +127,9 @@ class Machine:
                     manufacturing_date=data["manufacturing_date"],
                     status=data["status"],
                     order_id=data["order"]["id"] if data.get("order") else None,
-)
+                )
                 self.working_piece = piece.as_dict()
+                self.status = Machine.STATUS_WORKING
                 print(self.working_piece)
         except httpx.HTTPError as exc:
             print(exc)
@@ -217,7 +227,10 @@ class Machine:
     async def is_order_finished(order_id):
         """Return whether an order is finished or not."""
         try:
-            async with httpx.AsyncClient() as client:
+            async with httpx.AsyncClient(
+                    verify="/certs/ca.pem",
+                    cert=("/certs/machine/machine-cert.pem", "/certs/machine/machine-key.pem"),
+                    ) as client:
                 response = await client.get(
                     f"{ORDER_SERVICE_URL}/private/order/{order_id}"
                 )

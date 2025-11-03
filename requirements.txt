@@ -11,4 +11,5 @@ requests~=2.32.4
 httpx
 PyJWT
 aio_pika
-microservice-chassis-grupo2==0.1.6
+cryptography
+microservice-chassis-grupo2==0.1.12

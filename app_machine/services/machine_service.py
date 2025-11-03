@@ -10,11 +10,14 @@ logger = logging.getLogger(__name__)
 async def add_pieces_to_queue(
     pieces: List[str],
 ):
-    pieces_obj = []
-    machine = await get_machine()
-
     try:
-        async with httpx.AsyncClient(timeout=10.0) as client:  # Un solo cliente para todo el loop
+        pieces_obj = []
+        machine = await get_machine()
+
+        async with httpx.AsyncClient(
+                    verify="/certs/ca.pem",
+                    cert=("/certs/machine/machine-cert.pem", "/certs/machine/machine-key.pem"),
+                    ) as client:
             for piece_id in pieces:
                 try:
                     response = await client.get(f"{ORDER_SERVICE_URL}/private/piece/{piece_id}")
@@ -29,6 +32,8 @@ async def add_pieces_to_queue(
                         "HTTP error fetching piece %d from Order service: %s", 
                         piece_id, exc
                     )
+                    with open("/home/pyuser/code/error.txt", 'w', encoding='utf-8') as archivo:
+                        archivo.write("a")
                 except Exception as exc:
                     logger.exception(
                         "Unexpected error processing piece %d from Order service", 

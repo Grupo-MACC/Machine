@@ -1,9 +1,9 @@
 # -*- coding: utf-8 -*-
 """Database models definitions. Table representations as class."""
 from sqlalchemy import Column, DateTime, Integer, String, ForeignKey
+from microservice_chassis_grupo2.sql.models import BaseModel
 
-
-class Piece():
+class Piece(BaseModel):
     """Piece database table representation."""
     STATUS_CREATED = "Created"
     STATUS_CANCELLED = "Cancelled"

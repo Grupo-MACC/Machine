@@ -21,7 +21,7 @@ uvicorn app_machine.main:app \
   --ssl-keyfile /certs/machine/machine-key.pem \
   --ssl-certfile /certs/machine/machine-cert.pem \
   --ssl-ca-certs /certs/ca.pem \
-  --ssl-cert-reqs 1 & 
+  --ssl-cert-reqs 1 &
 
 UVICORN_PID=$!
 

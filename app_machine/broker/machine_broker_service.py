@@ -2,7 +2,7 @@ import asyncio
 import json
 import logging
 import httpx
-from microservice_chassis_grupo2.core.rabbitmq_core import get_channel, declare_exchange, PUBLIC_KEY_PATH
+from microservice_chassis_grupo2.core.rabbitmq_core import get_channel, declare_exchange, declare_exchange_logs, PUBLIC_KEY_PATH
 from aio_pika import Message
 from services import machine_service
 from microservice_chassis_grupo2.core.router_utils import AUTH_SERVICE_URL
@@ -19,6 +19,14 @@ async def publish_pieces_done(order_id: int, piece_ids: list[int]):
     msg = Message(body=json.dumps(payload).encode(), content_type="application/json", delivery_mode=2)
     await exchange.publish(msg, routing_key="piece.done")
     logger.info(f"[MACHINE] 📤 machine.pieces_done → order={order_id} pieces={piece_ids}")
+    await publish_to_logger(
+        message={
+            "message": "Publicado machine.pieces_done",
+            "order_id": order_id,
+            "piece_ids": piece_ids,
+        },
+        topic="machine.debug",
+    )
 
     await connection.close()
 
@@ -30,6 +38,16 @@ async def handle_do_pieces(message):
         piece_ids = data.get("piece_ids", [])
         await machine_service.add_pieces_to_queue(piece_ids)
 
+        logger.info(f"[MACHINE] 🧩 Recibido do.pieces → order={order_id} pieces={piece_ids}")
+        await publish_to_logger(
+            message={
+                "message": "Recibido do.pieces",
+                "order_id": order_id,
+                "piece_ids": piece_ids,
+            },
+            topic="machine.info",
+        )
+
 # ---------- CONSUMER BOOT ----------
 async def consume_do_pieces_events():
     _, channel = await get_channel()
@@ -40,7 +58,12 @@ async def consume_do_pieces_events():
     await queue.bind(exchange, routing_key="do.pieces")
 
     await queue.consume(handle_do_pieces)
+
     logger.info("[MACHINE] 🟢 Escuchando 'machine.do_pieces' …")
+    await publish_to_logger(
+        message={"message": "Escuchando machine.do_pieces"},
+        topic="machine.info",
+    )
     await asyncio.Future()
     
 async def consume_auth_events():
@@ -53,6 +76,12 @@ async def consume_auth_events():
     await machine_queue.bind(exchange, routing_key="auth.not_running")
     
     await machine_queue.consume(handle_auth_events)
+
+    logger.info("[MACHINE] 🟢 Escuchando eventos de auth (running/not_running)...")
+    await publish_to_logger(
+        message={"message": "Escuchando eventos de auth"},
+        topic="machine.info",
+    )
 
 async def handle_auth_events(message):
     async with message.process():
@@ -72,9 +101,25 @@ async def handle_auth_events(message):
                     with open(PUBLIC_KEY_PATH, "w", encoding="utf-8") as f:
                         f.write(public_key)
                     
-                    logger.info(f"✅ Clave pública de Auth guardada en {PUBLIC_KEY_PATH}")
+                    logger.info(f"[MACHINE] ✅ Clave pública de Auth guardada en {PUBLIC_KEY_PATH}")
+                    await publish_to_logger(
+                        message={
+                            "message": "Clave pública de Auth guardada",
+                            "path": PUBLIC_KEY_PATH,
+                        },
+                        topic="machine.info",
+                    )
             except Exception as exc:
                 print(exc)
+                logger.error(f"[MACHINE] ❌ Error obteniendo clave pública de Auth: {exc}")
+                await publish_to_logger(
+                    message={
+                        "message": "Error obteniendo clave pública de Auth",
+                        "error": str(exc),
+                    },
+                    topic="machine.error",
+                )
+
 
 async def publish_message(topic: str, message: dict):
     connection, channel = await get_channel()
@@ -84,4 +129,44 @@ async def publish_message(topic: str, message: dict):
     msg = Message(body=json.dumps(message).encode(), content_type="application/json", delivery_mode=2)
     await exchange.publish(message=msg, routing_key=topic)
 
+    logger.info(f"[MACHINE] 📤 Mensaje publicado → topic={topic}, payload={message}")
+    await publish_to_logger(
+        message={
+            "message": "Mensaje publicado desde machine",
+            "topic": topic,
+            "payload": message,
+        },
+        topic="machine.debug",
+    )
+    
     await connection.close()
+
+async def publish_to_logger(message: dict, topic: str):
+    """
+    Envía un log estructurado al sistema de logs.
+    topic: 'machine.info', 'machine.error', 'machine.debug', etc.
+    """
+    connection = None
+    try:
+        connection, channel = await get_channel()
+        exchange = await declare_exchange_logs(channel)
+
+        log_data = {
+            "measurement": "logs",
+            "service": topic.split(".")[0],   # 'machine'
+            "severity": topic.split(".")[1],  # 'info', 'error', 'debug'...
+            **message,
+        }
+
+        msg = Message(
+            body=json.dumps(log_data).encode(),
+            content_type="application/json",
+            delivery_mode=2,
+        )
+
+        await exchange.publish(message=msg, routing_key=topic)
+    except Exception as e:
+        print(f"[MACHINE] Error publishing to logger: {e}")
+    finally:
+        if connection:
+            await connection.close()

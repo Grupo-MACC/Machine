@@ -13,7 +13,6 @@ async def add_pieces_to_queue(
     try:
         pieces_obj = []
         machine = await get_machine()
-
         async with httpx.AsyncClient(
                     verify="/certs/ca.pem",
                     cert=("/certs/machine/machine-cert.pem", "/certs/machine/machine-key.pem"),
@@ -28,17 +27,17 @@ async def add_pieces_to_queue(
                     pieces_obj.append(schemas.Piece(**piece_data))
 
                 except httpx.HTTPError as exc:
+                    print(exc)
                     logger.error(
                         "HTTP error fetching piece %d from Order service: %s", 
                         piece_id, exc
                     )
-                    with open("/home/pyuser/code/error.txt", 'w', encoding='utf-8') as archivo:
-                        archivo.write("a")
                 except Exception as exc:
                     logger.exception(
                         "Unexpected error processing piece %d from Order service", 
                         piece_id
                     )
+
 
         # Añadimos todas las piezas a la cola de la máquina
         await machine.add_pieces_to_queue(pieces=pieces_obj)

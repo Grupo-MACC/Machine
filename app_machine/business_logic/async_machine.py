@@ -81,12 +81,10 @@ class Machine:
                 response.raise_for_status()
                 queued_pieces = response.json()
                 return queued_pieces
-        except (ProgrammingError, OperationalError):
-            logger.error("Error getting Queued Pieces at startup. It may be the first execution")
+        except Exception as exc:
+            print(exc)
             return []
-        except httpx.AsyncClient as exc:
-            return []
-
+        
     async def manufacturing_coroutine(self) -> None:
         """Coroutine that manufactures queued pieces one by one."""
         while not self.__stop_machine:

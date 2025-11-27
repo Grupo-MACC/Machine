@@ -13,15 +13,11 @@ terminate() {
 
 trap terminate SIGTERM SIGINT
 
-echo "Starting Uvicorn with TLS (mTLS enforced)..."
+echo "Starting Uvicorn (HTTP interno)..."
 
 uvicorn app_machine.main:app \
   --host 0.0.0.0 \
-  --port 5001 \
-  --ssl-keyfile /certs/machine/machine-key.pem \
-  --ssl-certfile /certs/machine/machine-cert.pem \
-  --ssl-ca-certs /certs/ca.pem \
-  --ssl-cert-reqs 1 &
+  --port 5001 &
 
 UVICORN_PID=$!
 

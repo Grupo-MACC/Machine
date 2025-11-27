@@ -15,12 +15,9 @@ async def add_pieces_to_queue(
         machine = await get_machine()
         
         # Discover order service via Consul
-        order_service_url = await get_service_url("order", "https://order:5000")
+        order_service_url = await get_service_url("order", "http://order:5000")
         
-        async with httpx.AsyncClient(
-                    verify="/certs/ca.pem",
-                    cert=("/certs/machine/machine-cert.pem", "/certs/machine/machine-key.pem"),
-                    ) as client:
+        async with httpx.AsyncClient() as client:
             for piece_id in pieces:
                 try:
                     response = await client.get(f"{order_service_url}/private/piece/{piece_id}")

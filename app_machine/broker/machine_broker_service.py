@@ -85,13 +85,11 @@ async def handle_auth_events(message):
         data = json.loads(message.body)
         if data["status"] == "running":
             try:
-                # Discover auth service via Consul (sin fallback para probar)
+                # Use Consul to discover auth service (no fallback)
                 auth_service_url = await get_service_url("auth")
+                logger.info(f"[MACHINE] 🔍 Auth descubierto via Consul: {auth_service_url}")
                 
-                async with httpx.AsyncClient(
-                    verify="/certs/ca.pem",
-                    cert=("/certs/machine/machine-cert.pem", "/certs/machine/machine-key.pem"),
-                ) as client:
+                async with httpx.AsyncClient() as client:
                     response = await client.get(
                         f"{auth_service_url}/auth/public-key"
                     )

@@ -3,10 +3,13 @@
 import asyncio
 import logging
 import httpx
+import os
 from random import randint
 from sqlalchemy.exc import ProgrammingError, OperationalError
 from sql.models import Piece
-from microservice_chassis_grupo2.core.router_utils import ORDER_SERVICE_URL
+
+# Use HTTP for internal communication (no TLS)
+ORDER_SERVICE_URL = os.getenv("ORDER_SERVICE_URL", "http://order:5000")
 
 logger = logging.getLogger(__name__)
 logger.debug("Machine logger set.")
@@ -48,10 +51,7 @@ class Machine:
     async def get_manufacturing_piece():
         """Gets the manufacturing piece from the database."""
         try:
-            async with httpx.AsyncClient(
-                    verify="/certs/ca.pem",
-                    cert=("/certs/machine/machine-cert.pem", "/certs/machine/machine-key.pem"),
-                    ) as client:
+            async with httpx.AsyncClient() as client:
                 response = await client.get(
                     f"{ORDER_SERVICE_URL}/private/piece_status/{Piece.STATUS_MANUFACTURING}"
                 )
@@ -71,10 +71,7 @@ class Machine:
     async def get_queued_pieces():
         """Get all queued pieces from the database."""
         try:
-            async with httpx.AsyncClient(
-                    verify="/certs/ca.pem",
-                    cert=("/certs/machine/machine-cert.pem", "/certs/machine/machine-key.pem"),
-                    ) as client:
+            async with httpx.AsyncClient() as client:
                 response = await client.get(
                     f"{ORDER_SERVICE_URL}/private/piece_status/{Piece.STATUS_QUEUED}"
                 )
@@ -111,10 +108,7 @@ class Machine:
         """Loads a piece for the given id and updates the working piece."""
         logger.debug("Updating working piece to %i", piece_id)
         try:
-            async with httpx.AsyncClient(
-                    verify="/certs/ca.pem",
-                    cert=("/certs/machine/machine-cert.pem", "/certs/machine/machine-key.pem"),
-                    ) as client:
+            async with httpx.AsyncClient() as client:
                 response = await client.get(
                     f"{ORDER_SERVICE_URL}/private/piece/{piece_id}"
                 )
@@ -225,10 +219,7 @@ class Machine:
     async def is_order_finished(order_id):
         """Return whether an order is finished or not."""
         try:
-            async with httpx.AsyncClient(
-                    verify="/certs/ca.pem",
-                    cert=("/certs/machine/machine-cert.pem", "/certs/machine/machine-key.pem"),
-                    ) as client:
+            async with httpx.AsyncClient() as client:
                 response = await client.get(
                     f"{ORDER_SERVICE_URL}/private/order/{order_id}"
                 )

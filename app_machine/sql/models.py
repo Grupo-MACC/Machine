@@ -10,6 +10,7 @@ class Piece(BaseModel):
     STATUS_QUEUED = "Queued"
     STATUS_MANUFACTURING = "Manufacturing"
     STATUS_MANUFACTURED = "Manufactured"
+    STATUS_TYPE = "A"
 
     __tablename__ = "piece"
     id = Column(Integer, primary_key=True)

@@ -1,67 +1,138 @@
+# app_machine/broker/machine_broker_service.py
+"""
+RabbitMQ broker para Machine.
+
+- Warehouse publica 1 pieza por mensaje a routing keys:
+    - machine.a  (piezas tipo A)
+    - machine.b  (piezas tipo B)
+- Machine consume SOLO su tipo.
+- Consumo justo entre réplicas:
+    - QoS prefetch_count=1
+    - ACK SOLO cuando termina la fabricación
+- Al terminar, publica en `piece.done`:
+    - order_id
+    - piece_id
+    - piece_type
+    - manufacturing_date (UTC ahora)
+"""
+
 import asyncio
 import json
 import logging
-import httpx
-from microservice_chassis_grupo2.core.rabbitmq_core import get_channel, declare_exchange, PUBLIC_KEY_PATH, declare_exchange_logs
+import os
 from aio_pika import Message
-from services import machine_service
+
+from microservice_chassis_grupo2.core.rabbitmq_core import (
+    get_channel,
+    declare_exchange,
+    PUBLIC_KEY_PATH,
+    declare_exchange_logs,
+)
+
+import httpx
 from consul_client import get_service_url
+from dependencies import get_machine
 
 logger = logging.getLogger(__name__)
 
-async def publish_pieces_done(order_id: int, piece_ids: list[int]):
-    connection, channel = await get_channel()
-    
-    exchange = await declare_exchange(channel)
+# ---------------------------------------------------------------------
+# Configuración por entorno: te permite reutilizar el MISMO código
+# para machine-A / machine-B y para réplicas sin tocar el source.
+# ---------------------------------------------------------------------
+MACHINE_PIECE_TYPE = os.getenv("MACHINE_PIECE_TYPE", "A")  # "A" o "B"
+MACHINE_ROUTING_KEY = os.getenv("MACHINE_ROUTING_KEY", f"machine.{MACHINE_PIECE_TYPE.lower()}")
+MACHINE_QUEUE_NAME = os.getenv("MACHINE_QUEUE_NAME", f"machine_{MACHINE_PIECE_TYPE.lower()}_queue")
 
-    payload = {"order_id": order_id, "piece_ids": piece_ids}
 
-    msg = Message(body=json.dumps(payload).encode(), content_type="application/json", delivery_mode=2)
-    await exchange.publish(msg, routing_key="piece.done")
-    logger.info(f"[MACHINE] 📤 machine.pieces_done → order={order_id} pieces={piece_ids}")
-    await publish_to_logger(
-        message={
-            "message": "Publicado machine.pieces_done",
-            "order_id": order_id,
-            "piece_ids": piece_ids,
-        },
-        topic="machine.debug",
-    )
-    await connection.close()
-
-# ---------- HANDLER: consume machine.do_pieces ----------
+# ---------- HANDLER: consume piezas UNA A UNA ----------
 async def handle_do_pieces(message):
+    """
+    Consume mensajes con UNA pieza por mensaje.
+
+    Contrato esperado desde Warehouse:
+      - piece_id (str UUID)
+      - order_id (int)
+      - piece_type ('A'|'B')
+      - order_date (ISO str)  -> de momento no se usa, pero se acepta.
+
+    IMPORTANTE:
+    - Aquí NO se hace ACK hasta que termina la fabricación (sale del context manager).
+    - Con prefetch_count=1, esta instancia no recibirá otro mensaje mientras fabrica.
+    """
     async with message.process():
         data = json.loads(message.body)
-        order_id  = data.get("order_id")
-        piece_ids = data.get("piece_ids", [])
-        await machine_service.add_pieces_to_queue(piece_ids)
-        
-        logger.info(f"[MACHINE] Recibido do.pieces → order={order_id} pieces={piece_ids}")
+
+        piece_id = data.get("piece_id")
+        order_id = data.get("order_id")
+        piece_type = data.get("piece_type")
+        order_date = data.get("order_date")  # futuro: logging / DB
+
+        # Validación mínima
+        if not piece_id or order_id is None or piece_type not in ("A", "B"):
+            logger.error("[MACHINE] ❌ Mensaje inválido: %s", data)
+            return
+
+        # Seguridad: este servicio SOLO fabrica su tipo
+        if piece_type != MACHINE_PIECE_TYPE:
+            logger.error(
+                "[MACHINE] ❌ Pieza de tipo %s recibida pero esta machine es tipo %s. Mensaje=%s",
+                piece_type, MACHINE_PIECE_TYPE, data
+            )
+            # Lo ack-eo para no crear bucle infinito.
+            # Si quisieras "requeue", estarías reintentando un bug de routing.
+            return
+
+        machine = await get_machine()
+
+        # Fabricar (bloqueante async: sleep)
+        done_event = await machine.manufacture_piece(
+            order_id=order_id,
+            piece_id=piece_id,
+            order_date=order_date,
+            piece_type=piece_type,
+        )
+
+        # Publicar pieza terminada
+        await publish_message(topic="piece.done", message=done_event)
+
+        logger.info(
+            "[MACHINE-%s] ✅ Fabricada piece=%s (order=%s) → piece.done",
+            MACHINE_PIECE_TYPE,
+            piece_id,
+            order_id,
+        )
         await publish_to_logger(
-            message={
-                "message": "Recibido do.pieces",
-                "order_id": order_id,
-                "piece_ids": piece_ids,
-            },
+            message={"message": "Pieza fabricada", **done_event},
             topic="machine.info",
         )
 
+
 # ---------- CONSUMER BOOT ----------
 async def consume_do_pieces_events():
+    """
+    Arranca el consumer del tipo de machine configurado.
+
+    Claves para que haya reparto justo entre réplicas:
+    - prefetch_count=1
+    - ACK al final (cuando termina fabricación)
+    """
     _, channel = await get_channel()
-    
+    await channel.set_qos(prefetch_count=1)  # <- CRÍTICO
+
     exchange = await declare_exchange(channel)
 
-    queue = await channel.declare_queue("do_pieces_queue", durable=True)
-    await queue.bind(exchange, routing_key="do.pieces")
+    # CRÍTICO: cola diferente por tipo (A/B), pero compartida entre réplicas del mismo tipo
+    queue = await channel.declare_queue(MACHINE_QUEUE_NAME, durable=True)
+    await queue.bind(exchange, routing_key=MACHINE_ROUTING_KEY)
 
     await queue.consume(handle_do_pieces)
-    logger.info("[MACHINE] 🟢 Escuchando 'machine.do_pieces' …")
+
+    logger.info("[MACHINE-%s] 🟢 Escuchando '%s' en cola '%s' …", MACHINE_PIECE_TYPE, MACHINE_ROUTING_KEY, MACHINE_QUEUE_NAME)
     await publish_to_logger(
-        message={"message": "Escuchando machine.do_pieces"},
+        message={"message": "Escuchando piezas", "routing_key": MACHINE_ROUTING_KEY, "queue": MACHINE_QUEUE_NAME},
         topic="machine.info",
     )
+
     await asyncio.Future()
     
 async def consume_auth_events():

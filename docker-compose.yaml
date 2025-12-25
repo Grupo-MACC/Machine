@@ -5,5 +5,5 @@ services:
             dockerfile: Dockerfile
         container_name: machine
         ports:
-            - "5001:5001"
+            - "5000:5001"
         restart: on-failure

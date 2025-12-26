@@ -7,9 +7,7 @@ import os
 from random import randint
 from sqlalchemy.exc import ProgrammingError, OperationalError
 from sql.models import Piece
-
-# Use HTTP for internal communication (no TLS)
-ORDER_SERVICE_URL = os.getenv("ORDER_SERVICE_URL", "http://order:5000")
+from microservice_chassis_grupo2.core.consul import get_service_url
 
 logger = logging.getLogger(__name__)
 logger.debug("Machine logger set.")
@@ -53,7 +51,7 @@ class Machine:
         try:
             async with httpx.AsyncClient() as client:
                 response = await client.get(
-                    f"{ORDER_SERVICE_URL}/private/piece_status/{Piece.STATUS_MANUFACTURING}"
+                    f"{await get_service_url("order")}/private/piece_status/{Piece.STATUS_MANUFACTURING}"
                 )
                 response.raise_for_status()
                 manufacturing_pieces = response.json()
@@ -73,7 +71,7 @@ class Machine:
         try:
             async with httpx.AsyncClient() as client:
                 response = await client.get(
-                    f"{ORDER_SERVICE_URL}/private/piece_status/{Piece.STATUS_QUEUED}"
+                    f"{await get_service_url("order")}/private/piece_status/{Piece.STATUS_QUEUED}"
                 )
                 response.raise_for_status()
                 queued_pieces = response.json()
@@ -110,7 +108,7 @@ class Machine:
         try:
             async with httpx.AsyncClient() as client:
                 response = await client.get(
-                    f"{ORDER_SERVICE_URL}/private/piece/{piece_id}"
+                    f"{await get_service_url("order")}/private/piece/{piece_id}"
                 )
                 response.raise_for_status()
                 data = response.json()
@@ -221,7 +219,7 @@ class Machine:
         try:
             async with httpx.AsyncClient() as client:
                 response = await client.get(
-                    f"{ORDER_SERVICE_URL}/private/order/{order_id}"
+                    f"{await get_service_url("order")}/private/order/{order_id}"
                 )
                 response.raise_for_status()
                 db_order = response.json()

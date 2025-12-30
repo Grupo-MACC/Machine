@@ -9,6 +9,7 @@ from fastapi import FastAPI
 from broker import setup_rabbitmq, machine_broker_service
 from routers import machine_router
 from consul_client import create_consul_client
+from sql.database import init_db
 
 # Configure logging ################################################################################
 logging.config.fileConfig(os.path.join(os.path.dirname(__file__), "logging.ini"))
@@ -27,6 +28,8 @@ async def lifespan(__app: FastAPI):
     try:
         logger.info("Starting up")
         
+        await init_db()
+
         # Register with Consul
         result = await consul_client.register_service(
             service_name=service_name,
@@ -45,12 +48,14 @@ async def lifespan(__app: FastAPI):
             logger.error(f"Error configurando RabbitMQ: {e}")'''
         try:
             task_machine = asyncio.create_task(machine_broker_service.consume_do_pieces_events())
+            task_cancel = asyncio.create_task(machine_broker_service.consume_cancel_events())
             task_auth = asyncio.create_task(machine_broker_service.consume_auth_events())
         except Exception as e:
             logger.error(f"Error lanzando payment broker service: {e}")
         yield
     finally:
         task_machine.cancel()
+        task_cancel.cancel()
         task_auth.cancel()
         
         # Deregister from Consul

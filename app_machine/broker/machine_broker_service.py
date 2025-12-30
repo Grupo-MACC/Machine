@@ -43,6 +43,14 @@ MACHINE_PIECE_TYPE = os.getenv("MACHINE_PIECE_TYPE", "A")  # "A" o "B"
 MACHINE_ROUTING_KEY = os.getenv("MACHINE_ROUTING_KEY", f"machine.{MACHINE_PIECE_TYPE.lower()}")
 MACHINE_QUEUE_NAME = os.getenv("MACHINE_QUEUE_NAME", f"machine_{MACHINE_PIECE_TYPE.lower()}_queue")
 
+SERVICE_ID = os.getenv("SERVICE_ID", "machine-1")
+
+ORDER_CANCEL_ROUTING_KEY = os.getenv("ORDER_CANCEL_ROUTING_KEY", "order.cancelled")
+ORDER_REACTIVATE_ROUTING_KEY = os.getenv("ORDER_REACTIVATE_ROUTING_KEY", "order.reactivated")
+
+# Cada instancia debe tener SU cola para recibir TODOS los cancel events
+CANCEL_QUEUE_NAME = os.getenv("CANCEL_QUEUE_NAME", f"machine_cancel_{SERVICE_ID}")
+
 
 # ---------- HANDLER: consume piezas UNA A UNA ----------
 async def handle_do_pieces(message):
@@ -65,47 +73,38 @@ async def handle_do_pieces(message):
         piece_id = data.get("piece_id")
         order_id = data.get("order_id")
         piece_type = data.get("piece_type")
-        order_date = data.get("order_date")  # futuro: logging / DB
+        order_date = data.get("order_date")
 
-        # Validación mínima
         if not piece_id or order_id is None or piece_type not in ("A", "B"):
             logger.error("[MACHINE] ❌ Mensaje inválido: %s", data)
             return
 
-        # Seguridad: este servicio SOLO fabrica su tipo
-        if piece_type != MACHINE_PIECE_TYPE:
-            logger.error(
-                "[MACHINE] ❌ Pieza de tipo %s recibida pero esta machine es tipo %s. Mensaje=%s",
-                piece_type, MACHINE_PIECE_TYPE, data
-            )
-            # Lo ack-eo para no crear bucle infinito.
-            # Si quisieras "requeue", estarías reintentando un bug de routing.
-            return
-
         machine = await get_machine()
 
-        # Fabricar (bloqueante async: sleep)
-        done_event = await machine.manufacture_piece(
-            order_id=order_id,
-            piece_id=piece_id,
-            order_date=order_date,
-            piece_type=piece_type,
-        )
+        # 1) Idempotencia: si ya está procesada, ACK y fuera
+        if await machine.is_piece_already_processed(piece_id):
+            logger.info("[MACHINE] ♻️ Duplicado piece_id=%s → ACK sin publicar", piece_id)
+            return
 
-        # Publicar pieza terminada
+        # 2) Blacklist: si cancelada, ACK y fuera
+        if await machine.is_order_blacklisted(int(order_id)):
+            logger.info("[MACHINE] 🚫 Order %s cancelada → skip piece %s", order_id, piece_id)
+            # Opcional: registrar SKIPPED lo hace manufacture_piece también, pero aquí ya lo sabemos
+            await machine.manufacture_piece(int(order_id), piece_id, piece_type, order_date)
+            return
+
+        # 3) Fabricar (persistirá inflight + manufactured)
+        done_event = await machine.manufacture_piece(int(order_id), piece_id, piece_type, order_date)
+
+        # Si decide no fabricar (blacklist o duplicado), no publicamos
+        if not done_event or done_event.get("result") != "MANUFACTURED":
+            return
+
+        # 4) Publicar evento
         await publish_message(topic="piece.done", message=done_event)
 
-        logger.info(
-            "[MACHINE-%s] ✅ Fabricada piece=%s (order=%s) → piece.done",
-            MACHINE_PIECE_TYPE,
-            piece_id,
-            order_id,
-        )
-        await publish_to_logger(
-            message={"message": "Pieza fabricada", **done_event},
-            topic="machine.info",
-        )
-
+        # 5) Marcar como publicado en DB
+        await machine.mark_done_published(piece_id)
 
 # ---------- CONSUMER BOOT ----------
 async def consume_do_pieces_events():
@@ -134,6 +133,49 @@ async def consume_do_pieces_events():
     )
 
     await asyncio.Future()
+
+
+async def handle_cancel_event(message):
+    """Actualiza blacklist local según evento."""
+    async with message.process():
+        data = json.loads(message.body)
+        order_id = data.get("order_id")
+        reason = data.get("reason")
+
+        if order_id is None:
+            logger.error("[MACHINE] ❌ Cancel event inválido: %s", data)
+            return
+
+        machine = await get_machine()
+
+        # Según routing key, decidimos acción
+        rk = message.routing_key
+        if rk == ORDER_CANCEL_ROUTING_KEY:
+            await machine.add_to_blacklist(int(order_id), reason=reason)
+            logger.warning("[MACHINE] 🚫 Order %s añadida a blacklist (reason=%s)", order_id, reason)
+        elif rk == ORDER_REACTIVATE_ROUTING_KEY:
+            await machine.remove_from_blacklist(int(order_id))
+            logger.info("[MACHINE] ✅ Order %s eliminada de blacklist", order_id)
+
+async def consume_cancel_events():
+    """
+    Consumer para cancelaciones.
+    Cada instancia recibe TODOS los cancel events y actualiza su blacklist local.
+    """
+    _, channel = await get_channel()
+    exchange = await declare_exchange(channel)
+
+    queue = await channel.declare_queue(CANCEL_QUEUE_NAME, durable=True)
+    await queue.bind(exchange, routing_key=ORDER_CANCEL_ROUTING_KEY)
+    await queue.bind(exchange, routing_key=ORDER_REACTIVATE_ROUTING_KEY)
+
+    await queue.consume(handle_cancel_event)
+
+    logger.info("[MACHINE] 🟡 Escuchando cancel events (%s / %s) en %s",
+                ORDER_CANCEL_ROUTING_KEY, ORDER_REACTIVATE_ROUTING_KEY, CANCEL_QUEUE_NAME)
+
+    await asyncio.Future()
+
     
 async def consume_auth_events():
     _, channel = await get_channel()

@@ -1,22 +1,75 @@
+# app_machine/sql/models.py
 # -*- coding: utf-8 -*-
-"""Database models definitions. Table representations as class."""
-from sqlalchemy import Column, DateTime, Integer, String, ForeignKey
-from microservice_chassis_grupo2.sql.models import BaseModel
+"""
+Modelos SQLAlchemy para Machine.
 
-class Piece(BaseModel):
-    """Piece database table representation."""
-    STATUS_CREATED = "Created"
-    STATUS_CANCELLED = "Cancelled"
-    STATUS_QUEUED = "Queued"
-    STATUS_MANUFACTURING = "Manufacturing"
-    STATUS_MANUFACTURED = "Manufactured"
-    STATUS_TYPE = "A"
+Tablas:
+- manufactured_piece: histórico de piezas finalizadas (y opcionalmente saltadas).
+- inflight_piece: estado persistente de la pieza en curso (1 fila).
+- order_blacklist: órdenes canceladas que esta instancia no debe fabricar.
+"""
 
-    __tablename__ = "piece"
-    id = Column(Integer, primary_key=True)
-    manufacturing_date = Column(DateTime(timezone=True), server_default=None)
-    status = Column(String(256), default=STATUS_QUEUED)
-    order_id = Column(
-        Integer,
-        ForeignKey('manufacturing_order.id', ondelete='cascade'),
-        nullable=True)
+from datetime import datetime, timezone
+from sqlalchemy import String, Integer, DateTime, Boolean, Text
+from sqlalchemy.orm import Mapped, mapped_column
+
+from sql.database import Base
+
+
+def utcnow() -> datetime:
+    """Devuelve datetime UTC aware."""
+    return datetime.now(timezone.utc)
+
+
+class ManufacturedPiece(Base):
+    """Histórico de piezas procesadas por esta instancia."""
+    __tablename__ = "manufactured_piece"
+
+    id: Mapped[int] = mapped_column(Integer, primary_key=True, autoincrement=True)
+
+    piece_id: Mapped[str] = mapped_column(String(64), nullable=False, unique=True, index=True)
+    order_id: Mapped[int] = mapped_column(Integer, nullable=False, index=True)
+    piece_type: Mapped[str] = mapped_column(String(1), nullable=False)  # 'A' o 'B'
+
+    order_date: Mapped[datetime | None] = mapped_column(DateTime(timezone=True), nullable=True)
+    manufacturing_date: Mapped[datetime | None] = mapped_column(DateTime(timezone=True), nullable=True)
+
+    # Útil para reinicios: saber si ya publicaste el evento piece.done
+    done_published: Mapped[bool] = mapped_column(Boolean, nullable=False, default=False)
+
+    # Opcional pero recomendable: auditar si se saltó por cancelación
+    result: Mapped[str] = mapped_column(String(32), nullable=False, default="MANUFACTURED")  # o 'SKIPPED'
+    reason: Mapped[str | None] = mapped_column(Text, nullable=True)
+
+
+class InflightPiece(Base):
+    """
+    Estado persistente de la pieza en curso.
+
+    Nota:
+    - Solo hay 1 en curso por instancia (prefetch=1).
+    - Usamos una única fila con PK fija = 1.
+    """
+    __tablename__ = "inflight_piece"
+
+    id: Mapped[int] = mapped_column(Integer, primary_key=True, default=1)
+
+    piece_id: Mapped[str] = mapped_column(String(64), nullable=False, index=True)
+    order_id: Mapped[int] = mapped_column(Integer, nullable=False, index=True)
+    piece_type: Mapped[str] = mapped_column(String(1), nullable=False)
+
+    order_date: Mapped[datetime | None] = mapped_column(DateTime(timezone=True), nullable=True)
+
+    started_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), nullable=False, default=utcnow)
+    duration_s: Mapped[int] = mapped_column(Integer, nullable=False)
+
+    done_published: Mapped[bool] = mapped_column(Boolean, nullable=False, default=False)
+
+
+class OrderBlacklist(Base):
+    """Órdenes canceladas que esta instancia no debe fabricar."""
+    __tablename__ = "order_blacklist"
+
+    order_id: Mapped[int] = mapped_column(Integer, primary_key=True)
+    created_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), nullable=False, default=utcnow)
+    reason: Mapped[str | None] = mapped_column(Text, nullable=True)

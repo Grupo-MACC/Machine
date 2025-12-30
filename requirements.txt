@@ -12,5 +12,4 @@ httpx
 PyJWT
 aio_pika
 cryptography
-aiomysql
-microservice-chassis-grupo2_cc==0.1.4
+microservice-chassis-grupo2_cc

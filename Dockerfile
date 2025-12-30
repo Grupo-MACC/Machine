@@ -15,10 +15,6 @@ ENV RABBITMQ_USER=guest
 ENV RABBITMQ_PASSWORD=guest
 ENV RABBITMQ_HOST=10.0.11.30
 ENV PUBLIC_KEY_PATH=/home/pyuser/code/auth_public.pem
-
-ENV DB_USER=admin
-ENV DB_PASSWORD=maccadmin
-ENV DB_NAME=machine_db
 # Consul Service Discovery
 ENV CONSUL_HOST=10.0.11.40
 ENV CONSUL_PORT=8500

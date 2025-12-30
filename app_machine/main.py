@@ -9,8 +9,6 @@ from fastapi import FastAPI
 from broker import setup_rabbitmq, machine_broker_service
 from routers import machine_router
 from microservice_chassis_grupo2.core.consul import create_consul_client
-from microservice_chassis_grupo2.sql import database, models
-
 
 # Configure logging ################################################################################
 logging.config.fileConfig(os.path.join(os.path.dirname(__file__), "logging.ini"))
@@ -28,10 +26,7 @@ async def lifespan(__app: FastAPI):
 
     try:
         logger.info("Starting up")
-        # ✅ PRIMERO: Inicializar la base de datos
-        logger.info("Initializing database connection")
-        await database.init_database()
-        logger.info("Database connection initialized")
+
         '''try:
             await setup_rabbitmq.setup_rabbitmq()
         except Exception as e:
@@ -40,10 +35,7 @@ async def lifespan(__app: FastAPI):
             task_machine = asyncio.create_task(machine_broker_service.consume_do_pieces_events())
             task_auth = asyncio.create_task(machine_broker_service.consume_auth_events())
         except Exception as e:
-            logger.error(f"Could not create tables at startup")
-            logger.error(f"Error type: {type(e).__name__}")
-            logger.error(f"Error message: {str(e)}")
-            logger.error(f"Traceback:", exc_info=True)
+            logger.error(f"Error lanzando payment broker service: {e}")
         yield
     finally:
         task_machine.cancel()

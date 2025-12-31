@@ -9,7 +9,7 @@ from fastapi import FastAPI
 from broker import setup_rabbitmq, machine_broker_service
 from routers import machine_router
 from consul_client import create_consul_client
-from sql.database import init_db
+from microservice_chassis_grupo2.sql import database, models
 
 # Configure logging ################################################################################
 logging.config.fileConfig(os.path.join(os.path.dirname(__file__), "logging.ini"))
@@ -28,7 +28,6 @@ async def lifespan(__app: FastAPI):
     try:
         logger.info("Starting up")
         
-        await init_db()
 
         # Register with Consul
         result = await consul_client.register_service(
@@ -42,10 +41,14 @@ async def lifespan(__app: FastAPI):
         )
         logger.info(f"✅ Consul service registration: {result}")
 
-        '''try:
-            await setup_rabbitmq.setup_rabbitmq()
-        except Exception as e:
-            logger.error(f"Error configurando RabbitMQ: {e}")'''
+        # Creación de tablas
+        try:
+            logger.info("[MACHINE] 🗄️ Creando tablas de base de datos")
+            async with database.engine.begin() as conn:
+                await conn.run_sync(models.Base.metadata.create_all)
+        except Exception as exc:
+            logger.exception("[MACHINE] ❌ Error creando tablas: %s", exc)
+
         try:
             task_machine = asyncio.create_task(machine_broker_service.consume_do_pieces_events())
             task_cancel = asyncio.create_task(machine_broker_service.consume_cancel_events())

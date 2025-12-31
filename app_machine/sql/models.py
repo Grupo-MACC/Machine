@@ -12,8 +12,7 @@ Tablas:
 from datetime import datetime, timezone
 from sqlalchemy import String, Integer, DateTime, Boolean, Text
 from sqlalchemy.orm import Mapped, mapped_column
-
-from sql.database import Base
+from microservice_chassis_grupo2.sql.models import BaseModel
 
 
 def utcnow() -> datetime:
@@ -21,7 +20,7 @@ def utcnow() -> datetime:
     return datetime.now(timezone.utc)
 
 
-class ManufacturedPiece(Base):
+class ManufacturedPiece(BaseModel):
     """Histórico de piezas procesadas por esta instancia."""
     __tablename__ = "manufactured_piece"
 
@@ -42,7 +41,7 @@ class ManufacturedPiece(Base):
     reason: Mapped[str | None] = mapped_column(Text, nullable=True)
 
 
-class InflightPiece(Base):
+class InflightPiece(BaseModel):
     """
     Estado persistente de la pieza en curso.
 
@@ -66,7 +65,7 @@ class InflightPiece(Base):
     done_published: Mapped[bool] = mapped_column(Boolean, nullable=False, default=False)
 
 
-class OrderBlacklist(Base):
+class OrderBlacklist(BaseModel):
     """Órdenes canceladas que esta instancia no debe fabricar."""
     __tablename__ = "order_blacklist"
 

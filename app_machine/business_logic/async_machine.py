@@ -8,21 +8,48 @@ Incluye:
 - Guardado de piezas finalizadas (manufactured_piece).
 - Blacklist local (order_blacklist) para saltar órdenes canceladas.
 - Idempotencia por piece_id: si ya está registrada como procesada, no se refabrica.
+
+NOTA IMPORTANTE (adaptación DB):
+- Antes se usaba SessionLocal desde sql.database.
+- Ahora la sesión se obtiene mediante get_db del chassis.
+- get_db es un async generator, por eso lo envolvemos en un async context manager
+  para abrir/cerrar sesión correctamente.
 """
 
 import asyncio
 import logging
 import os
+from contextlib import asynccontextmanager
 from datetime import datetime, timezone
 from random import randint
 
 from sqlalchemy import select, delete
 from sqlalchemy.exc import IntegrityError
 
-from sql.database import SessionLocal
+from microservice_chassis_grupo2.core.dependencies import get_db
 from sql.models import ManufacturedPiece, InflightPiece, OrderBlacklist
 
 logger = logging.getLogger(__name__)
+
+
+@asynccontextmanager
+async def db_session():
+    """
+    Context manager para obtener una AsyncSession usando get_db().
+
+    get_db() (del chassis) es un async generator (yield session).
+    Para usarlo fuera de Depends(...), lo convertimos a context manager.
+
+    Esto evita:
+    - fugas de conexiones/sesiones
+    - dejar el generador sin cerrar
+    """
+    agen = get_db()
+    try:
+        session = await anext(agen)  # Python 3.12+
+        yield session
+    finally:
+        await agen.aclose()
 
 
 def parse_iso_to_dt(value: str | None) -> datetime | None:
@@ -77,14 +104,14 @@ class Machine:
     # -------------------------
     async def is_order_blacklisted(self, order_id: int) -> bool:
         """Devuelve True si el order_id está en blacklist local."""
-        async with SessionLocal() as session:
+        async with db_session() as session:
             q = select(OrderBlacklist).where(OrderBlacklist.order_id == order_id)
             row = (await session.execute(q)).scalar_one_or_none()
             return row is not None
 
     async def add_to_blacklist(self, order_id: int, reason: str | None = None) -> None:
         """Inserta (idempotente) order_id en blacklist."""
-        async with SessionLocal() as session:
+        async with db_session() as session:
             existing = (await session.execute(
                 select(OrderBlacklist).where(OrderBlacklist.order_id == order_id)
             )).scalar_one_or_none()
@@ -95,7 +122,7 @@ class Machine:
 
     async def remove_from_blacklist(self, order_id: int) -> None:
         """Elimina order_id de blacklist (si existe)."""
-        async with SessionLocal() as session:
+        async with db_session() as session:
             await session.execute(delete(OrderBlacklist).where(OrderBlacklist.order_id == order_id))
             await session.commit()
 
@@ -104,14 +131,14 @@ class Machine:
     # -------------------------
     async def is_piece_already_processed(self, piece_id: str) -> bool:
         """True si esta instancia ya registró esa piece_id en manufactured_piece."""
-        async with SessionLocal() as session:
+        async with db_session() as session:
             q = select(ManufacturedPiece).where(ManufacturedPiece.piece_id == piece_id)
             row = (await session.execute(q)).scalar_one_or_none()
             return row is not None
 
     async def mark_done_published(self, piece_id: str) -> None:
         """Marca que ya se publicó el evento piece.done para esa piece_id."""
-        async with SessionLocal() as session:
+        async with db_session() as session:
             row = (await session.execute(
                 select(ManufacturedPiece).where(ManufacturedPiece.piece_id == piece_id)
             )).scalar_one_or_none()
@@ -136,12 +163,13 @@ class Machine:
         if not self._resume_on_boot:
             return None
 
-        async with SessionLocal() as session:
-            inflight = (await session.execute(select(InflightPiece).where(InflightPiece.id == 1))).scalar_one_or_none()
+        async with db_session() as session:
+            inflight = (await session.execute(
+                select(InflightPiece).where(InflightPiece.id == 1)
+            )).scalar_one_or_none()
             if not inflight:
                 return None
 
-            # Si ya la registramos como procesada, limpiamos inflight y listo
             already = (await session.execute(
                 select(ManufacturedPiece).where(ManufacturedPiece.piece_id == inflight.piece_id)
             )).scalar_one_or_none()
@@ -150,7 +178,6 @@ class Machine:
                 await session.commit()
                 return None
 
-            # Reanudar “tiempo restante”
             now = datetime.now(timezone.utc)
             elapsed = (now - inflight.started_at).total_seconds()
             remaining = max(0, inflight.duration_s - int(elapsed))
@@ -168,11 +195,9 @@ class Machine:
                 "order_date": inflight.order_date.isoformat() if inflight.order_date else None,
             }
 
-        # Dormimos fuera de la sesión
         if remaining > 0:
             await asyncio.sleep(remaining)
 
-        # Finalizamos (y dejamos listo para publicar si aún no se publicó)
         done_event = await self._finalize_piece(
             order_id=self.working_piece["order_id"],
             piece_id=self.working_piece["piece_id"],
@@ -201,10 +226,8 @@ class Machine:
             Evento piece.done a publicar, o None si se decide “no fabricar”.
         """
         async with self._lock:
-            # 1) Blacklist
             if await self.is_order_blacklisted(order_id):
                 logger.info("[MACHINE] 🚫 Order %s en blacklist: skip piece %s", order_id, piece_id)
-                # Si quieres auditar saltos:
                 await self._finalize_piece(
                     order_id=order_id,
                     piece_id=piece_id,
@@ -216,20 +239,17 @@ class Machine:
                 )
                 return None
 
-            # 2) Idempotencia
             if await self.is_piece_already_processed(piece_id):
                 logger.info("[MACHINE] ♻️ piece_id %s ya procesada: ACK sin refabricar", piece_id)
                 return None
 
-            # 3) Arranque de fabricación: guardamos inflight
             duration = randint(self._min_s, self._max_s)
             started_at = datetime.now(timezone.utc)
 
             self.status = self.STATUS_WORKING
             self.working_piece = {"order_id": order_id, "piece_id": piece_id, "piece_type": piece_type, "order_date": order_date}
 
-            async with SessionLocal() as session:
-                # Reemplaza la fila inflight (PK=1)
+            async with db_session() as session:
                 await session.execute(delete(InflightPiece).where(InflightPiece.id == 1))
                 session.add(InflightPiece(
                     id=1,
@@ -246,7 +266,6 @@ class Machine:
             logger.info("[MACHINE-%s] 🛠️ Fabricando piece=%s order=%s (t=%ss)", piece_type, piece_id, order_id, duration)
             await asyncio.sleep(duration)
 
-            # 4) Antes de finalizar, recheck blacklist (por si cancelaron mientras fabricaba)
             if await self.is_order_blacklisted(order_id):
                 logger.warning("[MACHINE] 🚫 Order %s se canceló DURANTE fabricación. Skip publish.", order_id)
                 await self._finalize_piece(
@@ -260,7 +279,6 @@ class Machine:
                 )
                 return None
 
-            # 5) Finalizar fabricada
             done_event = await self._finalize_piece(
                 order_id=order_id,
                 piece_id=piece_id,
@@ -291,8 +309,7 @@ class Machine:
         manufactured_at_dt = datetime.now(timezone.utc)
         order_date_dt = parse_iso_to_dt(order_date)
 
-        async with SessionLocal() as session:
-            # Inserta manufactured_piece si no existe (idempotencia a nivel DB)
+        async with db_session() as session:
             try:
                 session.add(ManufacturedPiece(
                     piece_id=piece_id,
@@ -306,10 +323,8 @@ class Machine:
                 ))
                 await session.commit()
             except IntegrityError:
-                # Ya existe -> idempotencia
                 await session.rollback()
 
-            # Limpia inflight si coincide
             await session.execute(delete(InflightPiece).where(InflightPiece.id == 1))
             await session.commit()
 

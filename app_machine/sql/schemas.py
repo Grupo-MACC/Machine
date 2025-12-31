@@ -1,10 +1,13 @@
 # -*- coding: utf-8 -*-
-"""Classes for Request/Response schema definitions."""
-# pylint: disable=too-few-public-methods
-from typing import Optional
-from datetime import datetime
-from pydantic import BaseModel, Field, ConfigDict  # pylint: disable=no-name-in-module
+"""
+Schemas Pydantic para exponer datos de Machine.
+"""
 
+from __future__ import annotations
+
+from datetime import datetime
+from typing import Optional, List
+from pydantic import BaseModel, ConfigDict, Field
 
 class Message(BaseModel):
     """Message schema definition."""
@@ -64,3 +67,48 @@ class Piece(PieceBase):
     """Piece schema definition."""
     model_config = ConfigDict(from_attributes=True)  # ORM mode ON
     order: Optional[Order] = Field(description="Order where the piece belongs to")
+
+
+class ManufacturedPieceOut(BaseModel):
+    """
+    Respuesta de una pieza procesada por Machine.
+
+    Nota:
+    - 'result' te permite extender a futuro (MANUFACTURED / SKIPPED).
+    - 'done_published' te sirve para depurar reinicios y publicación de eventos.
+    """
+    model_config = ConfigDict(from_attributes=True)
+
+    piece_id: str = Field(..., description="UUID de la pieza")
+    order_id: int = Field(..., description="ID de la orden")
+    piece_type: str = Field(..., description="Tipo de pieza (A/B)")
+    order_date: Optional[datetime] = Field(None, description="Fecha de la orden")
+    manufacturing_date: Optional[datetime] = Field(None, description="Fecha de fabricación")
+    done_published: bool = Field(..., description="Si se publicó piece.done")
+    result: str = Field(..., description="MANUFACTURED o SKIPPED")
+    reason: Optional[str] = Field(None, description="Motivo si no se fabricó")
+
+
+class OrderSummaryOut(BaseModel):
+    """
+    Resumen de producción agrupado por order_id.
+    """
+    order_id: int
+    manufactured_count: int
+
+
+class InflightPieceOut(BaseModel):
+    """
+    Estado persistido de la pieza en curso.
+
+    Útil para depurar reanudación tras reinicio.
+    """
+    model_config = ConfigDict(from_attributes=True)
+
+    piece_id: str
+    order_id: int
+    piece_type: str
+    order_date: Optional[datetime]
+    started_at: datetime
+    duration_s: int
+    done_published: bool

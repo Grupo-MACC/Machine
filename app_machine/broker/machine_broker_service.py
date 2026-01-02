@@ -51,7 +51,7 @@ ORDER_REACTIVATE_ROUTING_KEY = os.getenv("ORDER_REACTIVATE_ROUTING_KEY", "order.
 # Cada instancia debe tener SU cola para recibir TODOS los cancel events
 CANCEL_QUEUE_NAME = os.getenv("CANCEL_QUEUE_NAME", f"machine_cancel_{SERVICE_ID}")
 
-
+#region pieces
 # ---------- HANDLER: consume piezas UNA A UNA ----------
 async def handle_do_pieces(message):
     """
@@ -73,8 +73,9 @@ async def handle_do_pieces(message):
         piece_id = data.get("piece_id")
         order_id = data.get("order_id")
         piece_type = data.get("piece_type")
-        order_date = data.get("order_date")
+        order_date = data.get("order_date")  # futuro: logging / DB
 
+        # Validación mínima
         if not piece_id or order_id is None or piece_type not in ("A", "B"):
             logger.error("[MACHINE] ❌ Mensaje inválido: %s", data)
             return
@@ -105,6 +106,7 @@ async def handle_do_pieces(message):
 
         # 5) Marcar como publicado en DB
         await machine.mark_done_published(piece_id)
+
 
 # ---------- CONSUMER BOOT ----------
 async def consume_do_pieces_events():

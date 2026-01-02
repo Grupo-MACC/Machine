@@ -1,310 +1,343 @@
+# app_machine/business_logic/async_machine.py
 # -*- coding: utf-8 -*-
-"""Simulation of a machine that manufactures pieces."""
+"""
+Lógica de fabricación con persistencia e idempotencia.
+
+Incluye:
+- Guardado de pieza en curso (inflight_piece) para reanudar tras reinicio.
+- Guardado de piezas finalizadas (manufactured_piece).
+- Blacklist local (order_blacklist) para saltar órdenes canceladas.
+- Idempotencia por piece_id: si ya está registrada como procesada, no se refabrica.
+
+NOTA IMPORTANTE (adaptación DB):
+- Antes se usaba SessionLocal desde sql.database.
+- Ahora la sesión se obtiene mediante get_db del chassis.
+- get_db es un async generator, por eso lo envolvemos en un async context manager
+  para abrir/cerrar sesión correctamente.
+"""
+
 import asyncio
 import logging
-import httpx
 import os
+from contextlib import asynccontextmanager
+from datetime import datetime, timezone
 from random import randint
-from sqlalchemy.exc import ProgrammingError, OperationalError
-from sql.models import Piece
 
-# Use HTTP for internal communication (no TLS)
-ORDER_SERVICE_URL = os.getenv("ORDER_SERVICE_URL", "http://order:5000")
+from sqlalchemy import select, delete
+from sqlalchemy.exc import IntegrityError
+
+from microservice_chassis_grupo2.core.dependencies import get_db
+from sql.models import ManufacturedPiece, InflightPiece, OrderBlacklist
 
 logger = logging.getLogger(__name__)
-logger.debug("Machine logger set.")
+
+
+@asynccontextmanager
+async def db_session():
+    """
+    Context manager para obtener una AsyncSession usando get_db().
+
+    get_db() (del chassis) es un async generator (yield session).
+    Para usarlo fuera de Depends(...), lo convertimos a context manager.
+
+    Esto evita:
+    - fugas de conexiones/sesiones
+    - dejar el generador sin cerrar
+    """
+    agen = get_db()
+    try:
+        session = await anext(agen)  # Python 3.12+
+        yield session
+    finally:
+        await agen.aclose()
+
+
+def parse_iso_to_dt(value: str | None) -> datetime | None:
+    """
+    Convierte ISO string a datetime aware.
+
+    Acepta formato con 'Z' al final (lo convierte a +00:00).
+    """
+    if not value:
+        return None
+    v = value.strip()
+    if v.endswith("Z"):
+        v = v[:-1] + "+00:00"
+    return datetime.fromisoformat(v)
+
+
+def utc_now_iso() -> str:
+    """Devuelve datetime UTC en ISO con Z."""
+    return datetime.now(timezone.utc).isoformat().replace("+00:00", "Z")
 
 
 class Machine:
-    """Piece manufacturing machine simulator."""
+    """
+    Máquina de fabricación con DB local.
+
+    Variables de entorno útiles:
+    - MACHINE_MIN_SECONDS / MACHINE_MAX_SECONDS: rango de tiempo de fabricación.
+    - MACHINE_RESUME_ON_BOOT: 'true'/'false' para reanudar inflight al arrancar.
+    """
+
     STATUS_WAITING = "Waiting"
-    STATUS_CHANGING_PIECE = "Changing Piece"
     STATUS_WORKING = "Working"
-    __manufacturing_queue = asyncio.Queue()
-    __stop_machine = False
-    working_piece = None
-    status = STATUS_WAITING
 
-    @classmethod
-    async def create(cls):
-        """Machine constructor: loads manufacturing/queued pieces and starts simulation."""
-        logger.info("AsyncMachine initialized")
-        self = Machine()
-        asyncio.create_task(self.manufacturing_coroutine())
-        await self.reload_queue_from_database()
-        return self
-
-    async def reload_queue_from_database(self):
-        """Reload queue from database, to reload data when the system has been rebooted."""
-        # Load the piece that was being manufactured
-        manufacturing_piece = await Machine.get_manufacturing_piece()
-        if manufacturing_piece:
-            await self.add_piece_to_queue(manufacturing_piece)
-
-        # Load the pieces that were in the queue
-        queued_pieces = await Machine.get_queued_pieces()
-
-        if queued_pieces:
-            await self.add_pieces_to_queue(queued_pieces)
-
-    @staticmethod
-    async def get_manufacturing_piece():
-        """Gets the manufacturing piece from the database."""
-        try:
-            async with httpx.AsyncClient() as client:
-                response = await client.get(
-                    f"{ORDER_SERVICE_URL}/private/piece_status/{Piece.STATUS_MANUFACTURING}"
-                )
-                response.raise_for_status()
-                manufacturing_pieces = response.json()
-            if manufacturing_pieces and manufacturing_pieces[0]:
-                return manufacturing_pieces[0]
-        except (ProgrammingError, OperationalError):
-            logger.error(
-                "Error getting Manufacturing Piece at startup. It may be the first execution"
-            )
-        except httpx.AsyncClient as exc:
-            logger.error("")
-        return None
-
-    @staticmethod
-    async def get_queued_pieces():
-        """Get all queued pieces from the database."""
-        try:
-            async with httpx.AsyncClient() as client:
-                response = await client.get(
-                    f"{ORDER_SERVICE_URL}/private/piece_status/{Piece.STATUS_QUEUED}"
-                )
-                response.raise_for_status()
-                queued_pieces = response.json()
-                return queued_pieces
-        except Exception as exc:
-            print(exc)
-            return []
-        
-    async def manufacturing_coroutine(self) -> None:
-        """Coroutine that manufactures queued pieces one by one."""
-        while not self.__stop_machine:
-            if self.__manufacturing_queue.empty():
-                self.status = self.STATUS_WAITING
-            piece_id = await self.__manufacturing_queue.get()
-            await self.create_piece(piece_id)
-            self.__manufacturing_queue.task_done()
-
-    async def create_piece(self, piece_id: int):
-        """Simulates piece manufacturing."""
-        # Machine and piece status updated during manufacturing
-        await self.update_working_piece(piece_id)
-        await self.working_piece_to_manufacturing()  # Update Machine&piece status
-
-        await asyncio.sleep(randint(5, 20))  # Simulates time spent manufacturing
-
-        await self.working_piece_to_finished()  # Update Machine&Piece status
-
+    def __init__(self) -> None:
+        self.status = self.STATUS_WAITING
         self.working_piece = None
 
+        self._min_s = int(os.getenv("MACHINE_MIN_SECONDS", "5"))
+        self._max_s = int(os.getenv("MACHINE_MAX_SECONDS", "20"))
+        self._resume_on_boot = os.getenv("MACHINE_RESUME_ON_BOOT", "true").lower() == "true"
 
-    async def update_working_piece(self, piece_id: int):
-        """Loads a piece for the given id and updates the working piece."""
-        logger.debug("Updating working piece to %i", piece_id)
-        try:
-            async with httpx.AsyncClient() as client:
-                response = await client.get(
-                    f"{ORDER_SERVICE_URL}/private/piece/{piece_id}"
-                )
-                response.raise_for_status()
-                data = response.json()
-                piece = Piece(
-                    id=data["id"],
-                    manufacturing_date=data["manufacturing_date"],
-                    status=data["status"],
-                    order_id=data["order"]["id"] if data.get("order") else None,
-                )
-                self.working_piece = piece.as_dict()
-                self.status = Machine.STATUS_WORKING
-                print(self.working_piece)
-        except httpx.HTTPError as exc:
-            print(exc)
-        except Exception as exc:
-            print(exc)
+        self._lock = asyncio.Lock()
 
-    async def working_piece_to_manufacturing(self):
-        from broker.machine_broker_service import publish_message
-        """Updates piece status to manufacturing."""
-        if self.working_piece["status"] not in [Piece.STATUS_MANUFACTURING, Piece.STATUS_MANUFACTURED]:
-            try:
-                piece_id = self.working_piece["id"]
-                status = Piece.STATUS_MANUFACTURING
+    @classmethod
+    async def create(cls) -> "Machine":
+        """Constructor asíncrono."""
+        logger.info("AsyncMachine initialized")
+        return cls()
 
-                # ✅ Estructura del mensaje a publicar
-                message = {
-                    "piece_id": piece_id,
-                    "status": status,
-                }
+    # -------------------------
+    # Blacklist
+    # -------------------------
+    async def is_order_blacklisted(self, order_id: int) -> bool:
+        """Devuelve True si el order_id está en blacklist local."""
+        async with db_session() as session:
+            q = select(OrderBlacklist).where(OrderBlacklist.order_id == order_id)
+            row = (await session.execute(q)).scalar_one_or_none()
+            return row is not None
 
-                # ✅ Publicar en RabbitMQ
-                await publish_message(
-                    topic="piece.done",
-                    message=message,
-                )
+    async def add_to_blacklist(self, order_id: int, reason: str | None = None) -> None:
+        """Inserta (idempotente) order_id en blacklist."""
+        async with db_session() as session:
+            existing = (await session.execute(
+                select(OrderBlacklist).where(OrderBlacklist.order_id == order_id)
+            )).scalar_one_or_none()
+            if existing:
+                return
+            session.add(OrderBlacklist(order_id=order_id, reason=reason))
+            await session.commit()
 
-                print(f"📦 Mensaje publicado en 'piece.done': pieza {piece_id} -> {status}")
+    async def remove_from_blacklist(self, order_id: int) -> None:
+        """Elimina order_id de blacklist (si existe)."""
+        async with db_session() as session:
+            await session.execute(delete(OrderBlacklist).where(OrderBlacklist.order_id == order_id))
+            await session.commit()
 
-            except Exception as exc:
-                print(f"❌ Error publicando actualización de pieza en RabbitMQ: {exc}")
+    # -------------------------
+    # Idempotencia / estado
+    # -------------------------
+    async def is_piece_already_processed(self, piece_id: str) -> bool:
+        """True si esta instancia ya registró esa piece_id en manufactured_piece."""
+        async with db_session() as session:
+            q = select(ManufacturedPiece).where(ManufacturedPiece.piece_id == piece_id)
+            row = (await session.execute(q)).scalar_one_or_none()
+            return row is not None
 
-    async def working_piece_to_finished(self):
-        from broker.machine_broker_service import publish_message
+    async def mark_done_published(self, piece_id: str) -> None:
+        """Marca que ya se publicó el evento piece.done para esa piece_id."""
+        async with db_session() as session:
+            row = (await session.execute(
+                select(ManufacturedPiece).where(ManufacturedPiece.piece_id == piece_id)
+            )).scalar_one_or_none()
+            if row:
+                row.done_published = True
+                await session.commit()
 
-        """Updates piece status to finished and order if all pieces are finished."""
-        logger.debug("Working piece finished.")
-        self.status = Machine.STATUS_CHANGING_PIECE
-        """Updates piece status to manufacturing."""
-        try:
-            piece_id = self.working_piece["id"]
-            status = Piece.STATUS_MANUFACTURED
+    # -------------------------
+    # Resume (pieza en curso)
+    # -------------------------
+    async def resume_inflight_if_any(self) -> dict | None:
+        """
+        Si hay una pieza en curso guardada, intenta terminarla.
 
-            # ✅ Estructura del mensaje a publicar
-            message = {
-                "piece_id": piece_id,
-                "status": status,
-            }
+        Devuelve:
+            Evento piece.done a publicar, o None si no hay nada que reanudar.
 
-            # ✅ Publicar en RabbitMQ
-            await publish_message(
-                topic="piece.done",
-                message=message,
-            )
+        Limitación importante (realista):
+        - Con varias réplicas, el mensaje puede haberse reentregado a otra instancia y fabricado ya.
+          Por eso usamos piece_id UNIQUE e idempotencia: si ya está en manufactured_piece, no rehacemos.
+        """
+        if not self._resume_on_boot:
+            return None
 
-            print(f"📦 Mensaje publicado en 'piece.done': pieza {piece_id} -> {status}")
+        async with db_session() as session:
+            inflight = (await session.execute(
+                select(InflightPiece).where(InflightPiece.id == 1)
+            )).scalar_one_or_none()
+            if not inflight:
+                return None
 
-        except Exception as exc:
-            print(f"❌ Error publicando actualización de pieza en RabbitMQ: {exc}")
-        try:
-            piece_id = self.working_piece["id"]
+            already = (await session.execute(
+                select(ManufacturedPiece).where(ManufacturedPiece.piece_id == inflight.piece_id)
+            )).scalar_one_or_none()
+            if already:
+                await session.execute(delete(InflightPiece).where(InflightPiece.id == 1))
+                await session.commit()
+                return None
 
-            # ✅ Estructura del mensaje
-            message = {
-                "piece_id": piece_id
-            }
+            now = datetime.now(timezone.utc)
+            elapsed = (now - inflight.started_at).total_seconds()
+            remaining = max(0, inflight.duration_s - int(elapsed))
 
-            # ✅ Publicar en el topic correspondiente
-            await publish_message(
-                topic="piece.date",
-                message=message,
-            )
-
-            logger.info(f"📤 Mensaje publicado en 'piece.date': pieza {piece_id} -> update_date_to_now")
-            print(f"📤 Mensaje publicado en 'piece.date': pieza {piece_id} -> update_date_to_now")
-        except Exception as exc:
-            print(f"❌ Error publicando mensaje en 'piece.date': {exc}")
-
-        if await Machine.is_order_finished(self.working_piece['order_id']):
-            try:
-
-                # ✅ Estructura del mensaje a publicar
-                message = {
-                    "order_id": self.working_piece['order_id'],
-                }
-
-                # ✅ Publicar en RabbitMQ
-                await publish_message(
-                    topic="order.ready",
-                    message=message,
-                )
-            except Exception as exc:
-                print(f"❌ Error publicando actualización de pieza en RabbitMQ: {exc}")
-
-    @staticmethod
-    async def is_order_finished(order_id):
-        """Return whether an order is finished or not."""
-        try:
-            async with httpx.AsyncClient() as client:
-                response = await client.get(
-                    f"{ORDER_SERVICE_URL}/private/order/{order_id}"
-                )
-                response.raise_for_status()
-                db_order = response.json()
-                '''db_order = Order(
-                    id = data["id"],
-                    number_of_pieces = data["number_of_pieces"]
-                )'''
-                pieces = db_order["pieces"]
-
-        except httpx.HTTPError as exc:
-            logger.error("")
-        if not db_order:  # Just in case order has been removed
-            return False
-        
-        try:
-            #for piece in db_order.pieces:
-            for piece in pieces:
-                if piece["status"] != Piece.STATUS_MANUFACTURED:
-                    return False
-        except Exception as exc:
-            print(exc)
-        return True
-
-    async def add_pieces_to_queue(self, pieces):
-        """Adds a list of pieces to the queue and updates their status."""
-        logger.debug("Adding %i pieces to queue", len(pieces))
-        for piece in pieces:
-            await self.add_piece_to_queue(piece)
-
-    async def add_piece_to_queue(self, piece):
-        """Adds the given piece to the queue."""
-        try:
-            # Asegúrate de que piece es un objeto con atributo id
-            piece_id = getattr(piece, 'id', None) or (piece.get('id') if isinstance(piece, dict) else None)
-            if piece_id is None:
-                raise ValueError(f"Piece {piece} has neither attribute nor key 'id'")
-            
-            await self.__manufacturing_queue.put(piece_id)
-            logger.debug("After adding piece %s to queue", piece_id)
-            logger.debug("Piece %s added to manufacturing queue", piece_id)
-            
-        except Exception as e:
-            print("Failed to add piece to queue:", piece, e)
-            logger.exception("Failed to add piece %s to queue: %s", piece, e)
-
-
-
-    async def remove_pieces_from_queue(self, pieces):
-        """Adds a list of pieces to the queue and updates their status."""
-        logger.debug("Removing %i pieces from queue", len(pieces))
-        for piece in pieces:
-            await self.remove_piece_from_queue(piece)
-
-    async def remove_piece_from_queue(self, piece) -> bool:
-        """Removes the given piece from the queue."""
-        logger.info("Removing piece %i", piece)
-        if self.working_piece == piece:
             logger.warning(
-                "Piece %i is being manufactured, cannot remove from queue\n\n",
-                piece
+                "[MACHINE] 🔁 Reanudando inflight piece=%s (remaining=%ss)",
+                inflight.piece_id, remaining
             )
-            return False
 
-        item_list = []
-        removed = False
-        # Empty the list
-        while not self.__manufacturing_queue.empty():
-            item_list.append(self.__manufacturing_queue.get_nowait())
+            self.status = self.STATUS_WORKING
+            self.working_piece = {
+                "order_id": inflight.order_id,
+                "piece_id": inflight.piece_id,
+                "piece_type": inflight.piece_type,
+                "order_date": inflight.order_date.isoformat() if inflight.order_date else None,
+            }
 
-        # Fill the list with all items but *piece_id*
-        for item in item_list:
-            if item != piece:
-                self.__manufacturing_queue.put_nowait(item)
-            else:
-                logging.debug("Piece %i removed from queue.", piece)
-                removed = True
+        if remaining > 0:
+            await asyncio.sleep(remaining)
 
-        if not removed:
-            logger.warning("Piece %i not found in the queue.", piece)
+        done_event = await self._finalize_piece(
+            order_id=self.working_piece["order_id"],
+            piece_id=self.working_piece["piece_id"],
+            piece_type=self.working_piece["piece_type"],
+            order_date=self.working_piece["order_date"],
+            result="MANUFACTURED",
+            reason=None,
+            from_resume=True,
+        )
+        return done_event
 
-        return removed
+    # -------------------------
+    # Fabricación principal
+    # -------------------------
+    async def manufacture_piece(self, order_id: int, piece_id: str, piece_type: str, order_date: str | None) -> dict | None:
+        """
+        Fabrica una pieza con persistencia.
 
-    async def list_queued_pieces(self):
-        """Get queued piece ids as list."""
-        piece_list = list(self.__manufacturing_queue.__dict__['_queue'])
-        return piece_list
+        - Si order_id está en blacklist: no fabrica (y opcionalmente registra SKIPPED).
+        - Si piece_id ya está registrada: no fabrica (idempotencia).
+        - Guarda inflight antes de dormir (para resume).
+        - Al terminar, guarda manufactured_piece con done_published=False.
+          (El broker marcará done_published=True tras publicar en RabbitMQ).
+
+        Devuelve:
+            Evento piece.done a publicar, o None si se decide “no fabricar”.
+        """
+        async with self._lock:
+            if await self.is_order_blacklisted(order_id):
+                logger.info("[MACHINE] 🚫 Order %s en blacklist: skip piece %s", order_id, piece_id)
+                await self._finalize_piece(
+                    order_id=order_id,
+                    piece_id=piece_id,
+                    piece_type=piece_type,
+                    order_date=order_date,
+                    result="SKIPPED",
+                    reason="ORDER_BLACKLISTED",
+                    from_resume=False,
+                )
+                return None
+
+            if await self.is_piece_already_processed(piece_id):
+                logger.info("[MACHINE] ♻️ piece_id %s ya procesada: ACK sin refabricar", piece_id)
+                return None
+
+            duration = randint(self._min_s, self._max_s)
+            started_at = datetime.now(timezone.utc)
+
+            self.status = self.STATUS_WORKING
+            self.working_piece = {"order_id": order_id, "piece_id": piece_id, "piece_type": piece_type, "order_date": order_date}
+
+            async with db_session() as session:
+                await session.execute(delete(InflightPiece).where(InflightPiece.id == 1))
+                session.add(InflightPiece(
+                    id=1,
+                    order_id=order_id,
+                    piece_id=piece_id,
+                    piece_type=piece_type,
+                    order_date=parse_iso_to_dt(order_date),
+                    started_at=started_at,
+                    duration_s=duration,
+                    done_published=False,
+                ))
+                await session.commit()
+
+            logger.info("[MACHINE-%s] 🛠️ Fabricando piece=%s order=%s (t=%ss)", piece_type, piece_id, order_id, duration)
+            await asyncio.sleep(duration)
+
+            if await self.is_order_blacklisted(order_id):
+                logger.warning("[MACHINE] 🚫 Order %s se canceló DURANTE fabricación. Skip publish.", order_id)
+                await self._finalize_piece(
+                    order_id=order_id,
+                    piece_id=piece_id,
+                    piece_type=piece_type,
+                    order_date=order_date,
+                    result="SKIPPED",
+                    reason="CANCELLED_DURING_MANUFACTURING",
+                    from_resume=False,
+                )
+                return None
+
+            done_event = await self._finalize_piece(
+                order_id=order_id,
+                piece_id=piece_id,
+                piece_type=piece_type,
+                order_date=order_date,
+                result="MANUFACTURED",
+                reason=None,
+                from_resume=False,
+            )
+            return done_event
+
+    async def _finalize_piece(
+        self,
+        order_id: int,
+        piece_id: str,
+        piece_type: str,
+        order_date: str | None,
+        result: str,
+        reason: str | None,
+        from_resume: bool,
+    ) -> dict:
+        """
+        Persiste finalización (MANUFACTURED o SKIPPED), limpia inflight y devuelve el evento.
+
+        Nota:
+        - done_published se deja en False para que el broker lo marque a True tras publicar.
+        """
+        manufactured_at_dt = datetime.now(timezone.utc)
+        order_date_dt = parse_iso_to_dt(order_date)
+
+        async with db_session() as session:
+            try:
+                session.add(ManufacturedPiece(
+                    piece_id=piece_id,
+                    order_id=order_id,
+                    piece_type=piece_type,
+                    order_date=order_date_dt,
+                    manufacturing_date=(manufactured_at_dt if result == "MANUFACTURED" else None),
+                    done_published=False,
+                    result=result,
+                    reason=reason,
+                ))
+                await session.commit()
+            except IntegrityError:
+                await session.rollback()
+
+            await session.execute(delete(InflightPiece).where(InflightPiece.id == 1))
+            await session.commit()
+
+        self.status = self.STATUS_WAITING
+        self.working_piece = None
+
+        return {
+            "order_id": order_id,
+            "piece_id": piece_id,
+            "piece_type": piece_type,
+            "order_date": order_date,
+            "manufacturing_date": utc_now_iso(),
+            "result": result,
+            "reason": reason,
+            "from_resume": from_resume,
+        }

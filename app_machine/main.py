@@ -51,7 +51,7 @@ async def lifespan(__app: FastAPI):
 
         try:
             task_machine = asyncio.create_task(machine_broker_service.consume_do_pieces_events())
-            task_cancel = asyncio.create_task(machine_broker_service.consume_cancel_events())
+            task_cancel = asyncio.create_task(machine_broker_service.consume_cmd_machine_cancel())
             task_auth = asyncio.create_task(machine_broker_service.consume_auth_events())
         except Exception as e:
             logger.error(f"Error lanzando payment broker service: {e}")

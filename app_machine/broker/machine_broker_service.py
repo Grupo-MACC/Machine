@@ -35,10 +35,10 @@ from dependencies import get_machine
 
 logger = logging.getLogger(__name__)
 
-# ---------------------------------------------------------------------
-# Configuración por entorno: te permite reutilizar el MISMO código
+# ----------------------------- Config Rabbit ---------------------------------
+# Configuración por entorno: permite reutilizar el MISMO código
 # para machine-A / machine-B y para réplicas sin tocar el source.
-# ---------------------------------------------------------------------
+# -----------------------------------------------------------------------------
 MACHINE_PIECE_TYPE = os.getenv("MACHINE_PIECE_TYPE", "A")  # "A" o "B"
 MACHINE_ROUTING_KEY = os.getenv("MACHINE_ROUTING_KEY", f"machine.{MACHINE_PIECE_TYPE.lower()}")
 MACHINE_QUEUE_NAME = os.getenv("MACHINE_QUEUE_NAME", f"machine_{MACHINE_PIECE_TYPE.lower()}_queue")
@@ -51,7 +51,33 @@ ORDER_REACTIVATE_ROUTING_KEY = os.getenv("ORDER_REACTIVATE_ROUTING_KEY", "order.
 # Cada instancia debe tener SU cola para recibir TODOS los cancel events
 CANCEL_QUEUE_NAME = os.getenv("CANCEL_QUEUE_NAME", f"machine_cancel_{SERVICE_ID}")
 
-#region pieces
+# SAGA cancelación fabricación (Warehouse -> Machine -> Warehouse)
+RK_CMD_MACHINE_CANCEL = os.getenv("RK_CMD_MACHINE_CANCEL", "cmd.machine.cancel")
+RK_EVT_MACHINE_CANCELED = os.getenv("RK_EVT_MACHINE_CANCELED", "evt.machine.canceled")
+
+# Cola única por instancia (broadcast) para recibir SIEMPRE el cancel en todas las réplicas
+CMD_CANCEL_QUEUE_NAME = os.getenv("CMD_CANCEL_QUEUE_NAME", f"machine_cmd_cancel_{SERVICE_ID}")
+
+
+#region 0. HELPERS
+async def publish_message(topic: str, message: dict):
+    """
+    Publica un mensaje en el exchange con la routing key dada.
+    Arguments:
+        - topic: routing key
+        - message: dict con el contenido
+    """
+    connection, channel = await get_channel()
+    
+    exchange = await declare_exchange(channel)
+
+    msg = Message(body=json.dumps(message).encode(), content_type="application/json", delivery_mode=2)
+    await exchange.publish(message=msg, routing_key=topic)
+
+    await connection.close()
+
+
+#region 1. PIECE DO
 # ---------- HANDLER: consume piezas UNA A UNA ----------
 async def handle_do_pieces(message):
     """
@@ -137,48 +163,76 @@ async def consume_do_pieces_events():
     await asyncio.Future()
 
 
-async def handle_cancel_event(message):
-    """Actualiza blacklist local según evento."""
+#region 2. ORDER CANCEL
+async def handle_cmd_machine_cancel(message):
+    """
+    Procesa el comando de cancelación de fabricación enviado por Warehouse.
+
+    Payload esperado:
+        {
+            "order_id": int,
+            "saga_id": "..."   # opcional, Machine NO lo necesita para operar
+        }
+
+    Efecto:
+        - Marca order_id como cancelada en blacklist local (persistida).
+        - Publica evt.machine.canceled con:
+            - order_id
+            - machine: 'A'|'B'
+            - service_id (útil para debug)
+    """
     async with message.process():
         data = json.loads(message.body)
         order_id = data.get("order_id")
-        reason = data.get("reason")
 
         if order_id is None:
-            logger.error("[MACHINE] ❌ Cancel event inválido: %s", data)
+            logger.error("[MACHINE] ❌ cmd.machine.cancel inválido: %s", data)
             return
 
         machine = await get_machine()
 
-        # Según routing key, decidimos acción
-        rk = message.routing_key
-        if rk == ORDER_CANCEL_ROUTING_KEY:
-            await machine.add_to_blacklist(int(order_id), reason=reason)
-            logger.warning("[MACHINE] 🚫 Order %s añadida a blacklist (reason=%s)", order_id, reason)
-        elif rk == ORDER_REACTIVATE_ROUTING_KEY:
-            await machine.remove_from_blacklist(int(order_id))
-            logger.info("[MACHINE] ✅ Order %s eliminada de blacklist", order_id)
+        # TODO (futuro): blacklist compartida entre réplicas (Redis/DB central o evento broadcast dedicado)
+        await machine.add_to_blacklist(int(order_id), reason="CANCEL_MANUFACTURING")
 
-async def consume_cancel_events():
+        logger.warning("[MACHINE-%s] 🛑 Cancel recibida para order_id=%s", MACHINE_PIECE_TYPE, order_id)
+
+        # Notificar a Warehouse (ack del SAGA)
+        await publish_message(
+            topic=RK_EVT_MACHINE_CANCELED,
+            message={
+                "order_id": int(order_id),
+                "machine": MACHINE_PIECE_TYPE,
+                "service_id": SERVICE_ID,
+            },
+        )
+
+async def consume_cmd_machine_cancel():
     """
-    Consumer para cancelaciones.
-    Cada instancia recibe TODOS los cancel events y actualiza su blacklist local.
+    Consumer del comando cmd.machine.cancel.
+
+    IMPORTANTE:
+        - Esta cola es por instancia (usa SERVICE_ID), así TODAS las réplicas reciben el cancel.
+        - Esto implica posibles ACK duplicados hacia Warehouse -> Warehouse debe ser idempotente.
+          TODO (futuro): separar broadcast de cancelación vs ACK único por tipo A/B.
     """
     _, channel = await get_channel()
     exchange = await declare_exchange(channel)
 
-    queue = await channel.declare_queue(CANCEL_QUEUE_NAME, durable=True)
-    await queue.bind(exchange, routing_key=ORDER_CANCEL_ROUTING_KEY)
-    await queue.bind(exchange, routing_key=ORDER_REACTIVATE_ROUTING_KEY)
+    queue = await channel.declare_queue(CMD_CANCEL_QUEUE_NAME, durable=True)
+    await queue.bind(exchange, routing_key=RK_CMD_MACHINE_CANCEL)
 
-    await queue.consume(handle_cancel_event)
+    await queue.consume(handle_cmd_machine_cancel)
 
-    logger.info("[MACHINE] 🟡 Escuchando cancel events (%s / %s) en %s",
-                ORDER_CANCEL_ROUTING_KEY, ORDER_REACTIVATE_ROUTING_KEY, CANCEL_QUEUE_NAME)
+    logger.info(
+        "[MACHINE-%s] 🟡 Escuchando '%s' en cola '%s' (broadcast por instancia)",
+        MACHINE_PIECE_TYPE, RK_CMD_MACHINE_CANCEL, CMD_CANCEL_QUEUE_NAME
+    )
 
     await asyncio.Future()
 
-    
+
+
+#region 3. AUTH EVENTS    
 async def consume_auth_events():
     _, channel = await get_channel()
     
@@ -232,16 +286,8 @@ async def handle_auth_events(message):
                     topic="machine.error",
                 )
 
-async def publish_message(topic: str, message: dict):
-    connection, channel = await get_channel()
-    
-    exchange = await declare_exchange(channel)
 
-    msg = Message(body=json.dumps(message).encode(), content_type="application/json", delivery_mode=2)
-    await exchange.publish(message=msg, routing_key=topic)
-
-    await connection.close()
-
+#region 4. LOGGER
 async def publish_to_logger(message: dict, topic: str):
     """
     Envía un log estructurado al sistema de logs.

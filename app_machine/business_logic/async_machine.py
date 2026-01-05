@@ -27,7 +27,9 @@ from sqlalchemy import select, delete
 from sqlalchemy.exc import IntegrityError
 
 from microservice_chassis_grupo2.core.dependencies import get_db
-from sql.models import ManufacturedPiece, InflightPiece, OrderBlacklist
+from sql.models import ManufacturedPiece, InflightPiece
+from sql.blacklist_database import blacklist_session
+from sql.blacklist_models import OrderBlacklistEntry
 
 logger = logging.getLogger(__name__)
 
@@ -102,28 +104,41 @@ class Machine:
 
     #region 1.1 blacklist
     async def is_order_blacklisted(self, order_id: int) -> bool:
-        """Devuelve True si el order_id está en blacklist local."""
-        async with db_session() as session:
-            q = select(OrderBlacklist).where(OrderBlacklist.order_id == order_id)
-            row = (await session.execute(q)).scalar_one_or_none()
+        """
+        True si el order_id está en la blacklist compartida.
+
+        Implementación:
+            - Consulta BD compartida (Postgres/Aurora).
+            - PK = order_id => lookup directo.
+        """
+        async with blacklist_session() as session:
+            row = await session.get(OrderBlacklistEntry, order_id)
             return row is not None
 
     async def add_to_blacklist(self, order_id: int, reason: str | None = None) -> None:
-        """Inserta (idempotente) order_id en blacklist."""
-        async with db_session() as session:
-            existing = (await session.execute(
-                select(OrderBlacklist).where(OrderBlacklist.order_id == order_id)
-            )).scalar_one_or_none()
-            if existing:
-                return
-            session.add(OrderBlacklist(order_id=order_id, reason=reason))
-            await session.commit()
+        """
+        Inserta (idempotente) order_id en blacklist compartida.
+
+        Idempotencia:
+            - PK order_id => si ya existe, no debe romper el flujo.
+        """
+        from sqlalchemy.exc import IntegrityError  # import local para evitar ruido global
+
+        async with blacklist_session() as session:
+            session.add(OrderBlacklistEntry(order_id=order_id, reason=reason))
+            try:
+                await session.commit()
+            except IntegrityError:
+                # Ya existía -> idempotente
+                await session.rollback()
 
     async def remove_from_blacklist(self, order_id: int) -> None:
-        """Elimina order_id de blacklist (si existe)."""
-        async with db_session() as session:
-            await session.execute(delete(OrderBlacklist).where(OrderBlacklist.order_id == order_id))
-            await session.commit()
+        """
+        TODO (admin/ops):
+            - En el flujo normal NO se elimina.
+            - Si más adelante decides añadir mantenimiento admin, aquí iría el delete.
+        """
+        raise NotImplementedError("Blacklist compartida: no se elimina en el flujo normal.")
 
     #region 1.2 db pieces
     async def is_piece_already_processed(self, piece_id: str) -> bool:

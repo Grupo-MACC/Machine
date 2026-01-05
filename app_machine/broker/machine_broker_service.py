@@ -45,18 +45,15 @@ MACHINE_QUEUE_NAME = os.getenv("MACHINE_QUEUE_NAME", f"machine_{MACHINE_PIECE_TY
 
 SERVICE_ID = os.getenv("SERVICE_ID", "machine-1")
 
-ORDER_CANCEL_ROUTING_KEY = os.getenv("ORDER_CANCEL_ROUTING_KEY", "order.cancelled")
-ORDER_REACTIVATE_ROUTING_KEY = os.getenv("ORDER_REACTIVATE_ROUTING_KEY", "order.reactivated")
-
 # Cada instancia debe tener SU cola para recibir TODOS los cancel events
 CANCEL_QUEUE_NAME = os.getenv("CANCEL_QUEUE_NAME", f"machine_cancel_{SERVICE_ID}")
 
 # SAGA cancelación fabricación (Warehouse -> Machine -> Warehouse)
-RK_CMD_MACHINE_CANCEL = os.getenv("RK_CMD_MACHINE_CANCEL", "cmd.machine.cancel")
-RK_EVT_MACHINE_CANCELED = os.getenv("RK_EVT_MACHINE_CANCELED", "evt.machine.canceled")
+RK_CMD_MACHINE_CANCEL = "cmd.machine.cancel"
+RK_EVT_MACHINE_CANCELED = "evt.machine.canceled"
 
-# Cola única por instancia (broadcast) para recibir SIEMPRE el cancel en todas las réplicas
-CMD_CANCEL_QUEUE_NAME = os.getenv("CMD_CANCEL_QUEUE_NAME", f"machine_cmd_cancel_{SERVICE_ID}")
+# Cola COMPARTIDA entre réplicas: solo una consume cada mensaje
+MACHINE_CANCEL_QUEUE = "machine_cancel_queue"
 
 
 #region 0. HELPERS
@@ -166,69 +163,60 @@ async def consume_do_pieces_events():
 #region 2. ORDER CANCEL
 async def handle_cmd_machine_cancel(message):
     """
-    Procesa el comando de cancelación de fabricación enviado por Warehouse.
+    Consumer del comando cmd.machine.cancel.
 
     Payload esperado:
-        {
-            "order_id": int,
-            "saga_id": "..."   # opcional, Machine NO lo necesita para operar
-        }
+        {"order_id": int, "saga_id": str (opcional)}
 
     Efecto:
-        - Marca order_id como cancelada en blacklist local (persistida).
-        - Publica evt.machine.canceled con:
-            - order_id
-            - machine: 'A'|'B'
-            - service_id (útil para debug)
+        - Inserta order_id en blacklist COMPARTIDA (DB).
+        - Publica evt.machine.canceled como confirmación (SAGA).
     """
     async with message.process():
         data = json.loads(message.body)
         order_id = data.get("order_id")
+        saga_id = data.get("saga_id")
 
         if order_id is None:
             logger.error("[MACHINE] ❌ cmd.machine.cancel inválido: %s", data)
             return
 
         machine = await get_machine()
-
-        # TODO (futuro): blacklist compartida entre réplicas (Redis/DB central o evento broadcast dedicado)
         await machine.add_to_blacklist(int(order_id), reason="CANCEL_MANUFACTURING")
 
-        logger.warning("[MACHINE-%s] 🛑 Cancel recibida para order_id=%s", MACHINE_PIECE_TYPE, order_id)
+        logger.warning("[MACHINE] 🛑 Cancel registrada en blacklist compartida: order_id=%s", order_id)
 
-        # Notificar a Warehouse (ack del SAGA)
+        # Confirmación hacia Warehouse (SAGA)
+        payload = {"order_id": int(order_id)}
+        if saga_id is not None:
+            payload["saga_id"] = str(saga_id)
+
         await publish_message(
             topic=RK_EVT_MACHINE_CANCELED,
-            message={
-                "order_id": int(order_id),
-                "machine": MACHINE_PIECE_TYPE,
-                "service_id": SERVICE_ID,
-            },
+            message=payload,
         )
+
 
 async def consume_cmd_machine_cancel():
     """
-    Consumer del comando cmd.machine.cancel.
+    Escucha cmd.machine.cancel en una cola compartida.
 
-    IMPORTANTE:
-        - Esta cola es por instancia (usa SERVICE_ID), así TODAS las réplicas reciben el cancel.
-        - Esto implica posibles ACK duplicados hacia Warehouse -> Warehouse debe ser idempotente.
-          TODO (futuro): separar broadcast de cancelación vs ACK único por tipo A/B.
+    Semántica:
+        - Varias réplicas compiten por la misma cola -> solo una procesa el comando.
+        - Como la blacklist está en BD compartida, el efecto es global.
     """
     _, channel = await get_channel()
     exchange = await declare_exchange(channel)
 
-    queue = await channel.declare_queue(CMD_CANCEL_QUEUE_NAME, durable=True)
+    queue = await channel.declare_queue(MACHINE_CANCEL_QUEUE, durable=True)
     await queue.bind(exchange, routing_key=RK_CMD_MACHINE_CANCEL)
 
     await queue.consume(handle_cmd_machine_cancel)
 
-    logger.info(
-        "[MACHINE-%s] 🟡 Escuchando '%s' en cola '%s' (broadcast por instancia)",
-        MACHINE_PIECE_TYPE, RK_CMD_MACHINE_CANCEL, CMD_CANCEL_QUEUE_NAME
-    )
+    logger.info("[MACHINE] 🟠 Escuchando '%s' en cola '%s' (competing consumers)", RK_CMD_MACHINE_CANCEL, MACHINE_CANCEL_QUEUE)
 
     await asyncio.Future()
+
 
 
 

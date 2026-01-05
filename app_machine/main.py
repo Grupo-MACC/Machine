@@ -6,8 +6,9 @@ from contextlib import asynccontextmanager
 import uvicorn
 import asyncio
 from fastapi import FastAPI
-from broker import setup_rabbitmq, machine_broker_service
+from broker import machine_broker_service
 from routers import machine_router
+from sql.blacklist_database import init_blacklist_db
 from consul_client import create_consul_client
 from microservice_chassis_grupo2.sql import database, models
 
@@ -46,6 +47,7 @@ async def lifespan(__app: FastAPI):
             logger.info("[MACHINE] 🗄️ Creando tablas de base de datos")
             async with database.engine.begin() as conn:
                 await conn.run_sync(models.Base.metadata.create_all)
+                await init_blacklist_db()
         except Exception as exc:
             logger.exception("[MACHINE] ❌ Error creando tablas: %s", exc)
 

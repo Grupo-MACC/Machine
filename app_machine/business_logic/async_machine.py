@@ -31,7 +31,7 @@ from sql.models import ManufacturedPiece, InflightPiece, OrderBlacklist
 
 logger = logging.getLogger(__name__)
 
-
+#region 0. HELPERS
 @asynccontextmanager
 async def db_session():
     """
@@ -71,6 +71,7 @@ def utc_now_iso() -> str:
     return datetime.now(timezone.utc).isoformat().replace("+00:00", "Z")
 
 
+#region 1. MACHINE
 class Machine:
     """
     Máquina de fabricación con DB local.
@@ -99,9 +100,7 @@ class Machine:
         logger.info("AsyncMachine initialized")
         return cls()
 
-    # -------------------------
-    # Blacklist
-    # -------------------------
+    #region 1.1 blacklist
     async def is_order_blacklisted(self, order_id: int) -> bool:
         """Devuelve True si el order_id está en blacklist local."""
         async with db_session() as session:
@@ -126,9 +125,7 @@ class Machine:
             await session.execute(delete(OrderBlacklist).where(OrderBlacklist.order_id == order_id))
             await session.commit()
 
-    # -------------------------
-    # Idempotencia / estado
-    # -------------------------
+    #region 1.2 db pieces
     async def is_piece_already_processed(self, piece_id: str) -> bool:
         """True si esta instancia ya registró esa piece_id en manufactured_piece."""
         async with db_session() as session:
@@ -146,9 +143,7 @@ class Machine:
                 row.done_published = True
                 await session.commit()
 
-    # -------------------------
-    # Resume (pieza en curso)
-    # -------------------------
+    #region 1.3 doing piece
     async def resume_inflight_if_any(self) -> dict | None:
         """
         Si hay una pieza en curso guardada, intenta terminarla.
@@ -209,9 +204,7 @@ class Machine:
         )
         return done_event
 
-    # -------------------------
-    # Fabricación principal
-    # -------------------------
+    #region 1.4 main process
     async def manufacture_piece(self, order_id: int, piece_id: str, piece_type: str, order_date: str | None) -> dict | None:
         """
         Fabrica una pieza con persistencia.
@@ -227,7 +220,7 @@ class Machine:
         """
         async with self._lock:
             if await self.is_order_blacklisted(order_id):
-                logger.info("[MACHINE] 🚫 Order %s en blacklist: skip piece %s", order_id, piece_id)
+                logger.info("[MACHINE] ⛔ Order %s en blacklist: skip piece %s", order_id, piece_id)
                 await self._finalize_piece(
                     order_id=order_id,
                     piece_id=piece_id,
@@ -290,6 +283,7 @@ class Machine:
             )
             return done_event
 
+    #region 1.5 end piece
     async def _finalize_piece(
         self,
         order_id: int,

@@ -14,7 +14,7 @@ import logging
 from typing import Optional, List
 
 from fastapi import APIRouter, Depends, HTTPException, Query, status
-from sqlalchemy import select, func
+from sqlalchemy import select, func, delete
 from sqlalchemy.ext.asyncio import AsyncSession
 
 from microservice_chassis_grupo2.core.dependencies import (
@@ -25,6 +25,8 @@ from microservice_chassis_grupo2.core.dependencies import (
 
 from sql.models import ManufacturedPiece, InflightPiece
 from sql import schemas
+from sql.blacklist_database import blacklist_session
+from sql.blacklist_models import OrderBlacklistEntry
 from business_logic.async_machine import Machine
 from dependencies import get_machine
 
@@ -139,3 +141,90 @@ async def get_inflight(
     q = select(InflightPiece).where(InflightPiece.id == 1)
     row = (await db.execute(q)).scalar_one_or_none()
     return row
+
+#region blacklist delete
+async def require_blacklist_admin(user: int = Depends(get_current_user)) -> int:
+    """Permite endpoints de mantenimiento solo a admin (user_id=1)."""
+    if user != 1:
+        raise HTTPException(status_code=status.HTTP_403_FORBIDDEN, detail="Not authorized")
+    return user
+
+@router.get("/blacklist", response_model=schemas.BlacklistOut)
+async def list_blacklist(
+    limit: int = Query(default=5000, ge=1, le=20000, description="Máximo de order_id a devolver"),
+    offset: int = Query(default=0, ge=0, description="Offset de paginación"),
+    _: int = Depends(require_blacklist_admin),
+):
+    """
+    Devuelve los order_id almacenados en la blacklist compartida.
+
+    Importante:
+        - Consulta la BD compartida 'blacklist-db' (no la DB local de cada Machine).
+        - Se recomienda paginar (limit/offset) si la tabla crece.
+
+    Seguridad:
+        - Endpoint restringido a admin (user_id=1).
+    """
+    async with blacklist_session() as session:
+        # Total de entradas
+        total_q = select(func.count()).select_from(OrderBlacklistEntry)
+        total = int((await session.execute(total_q)).scalar_one())
+
+        # Lista de IDs (paginada)
+        ids_q = (
+            select(OrderBlacklistEntry.order_id)
+            .order_by(OrderBlacklistEntry.order_id.asc())
+            .limit(limit)
+            .offset(offset)
+        )
+        rows = (await session.execute(ids_q)).all()
+        order_ids = [r[0] for r in rows]
+
+    return {"total": total, "order_ids": order_ids}
+
+
+@router.delete("/blacklist", response_model=schemas.Message)
+async def clear_blacklist_db(
+    _: int = Depends(require_blacklist_admin),
+):
+    """Vacía por completo la tabla de blacklist compartida.
+
+    ⚠️ PELIGRO:
+        - Esto rompe la idempotencia de cancelación.
+        - Solo debería usarse en entorno DEV/TEST.
+
+    Devuelve:
+        - Mensaje con el número de filas borradas.
+    """
+    async with blacklist_session() as session:
+        result = await session.execute(delete(OrderBlacklistEntry))
+        await session.commit()
+
+    deleted = int(getattr(result, "rowcount", 0) or 0)
+    return {"detail": f"Blacklist cleared. Deleted rows: {deleted}"}
+
+
+@router.delete("/blacklist/{order_id}", response_model=schemas.Message)
+async def delete_blacklist_entry(
+    order_id: int,
+    _: int = Depends(require_blacklist_admin),
+):
+    """Elimina un registro concreto (order_id) de la blacklist compartida.
+
+    Uso típico:
+        - Reset de tests.
+        - Corrección manual en DEV.
+
+    Errores:
+        - 404 si no existe ese order_id en la blacklist.
+    """
+    async with blacklist_session() as session:
+        result = await session.execute(
+            delete(OrderBlacklistEntry).where(OrderBlacklistEntry.order_id == order_id)
+        )
+        await session.commit()
+
+    deleted = int(getattr(result, "rowcount", 0) or 0)
+    if deleted == 0:
+        raise HTTPException(status_code=404, detail="order_id not found in blacklist")
+    return {"detail": f"Deleted blacklist entry for order_id={order_id}"}

@@ -13,7 +13,8 @@ from consul_client import create_consul_client
 from microservice_chassis_grupo2.sql import database, models
 
 # Configure logging ################################################################################
-logging.config.fileConfig(os.path.join(os.path.dirname(__file__), "logging.ini"))
+# logging.config.fileConfig(os.path.join(os.path.dirname(__file__), "logging.ini"))
+logging.config.fileConfig(os.path.join(os.path.dirname(__file__), "logging.ini"),disable_existing_loggers=False,)
 logger = logging.getLogger(__name__)
 
 

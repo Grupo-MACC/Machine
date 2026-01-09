@@ -112,3 +112,14 @@ class InflightPieceOut(BaseModel):
     started_at: datetime
     duration_s: int
     done_published: bool
+
+class BlacklistOut(BaseModel):
+    """
+    Respuesta para consultar la blacklist compartida.
+
+    Campos:
+        - total: número total de order_id en la blacklist.
+        - order_ids: lista de order_id (paginada si usas limit/offset).
+    """
+    total: int = Field(..., description="Número total de order_id en la blacklist")
+    order_ids: List[int] = Field(..., description="Lista de order_id en blacklist")

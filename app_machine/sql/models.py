@@ -6,7 +6,6 @@ Modelos SQLAlchemy para Machine.
 Tablas:
 - manufactured_piece: histórico de piezas finalizadas (y opcionalmente saltadas).
 - inflight_piece: estado persistente de la pieza en curso (1 fila).
-- order_blacklist: órdenes canceladas que esta instancia no debe fabricar.
 """
 
 from datetime import datetime, timezone
@@ -63,12 +62,3 @@ class InflightPiece(BaseModel):
     duration_s: Mapped[int] = mapped_column(Integer, nullable=False)
 
     done_published: Mapped[bool] = mapped_column(Boolean, nullable=False, default=False)
-
-
-class OrderBlacklist(BaseModel):
-    """Órdenes canceladas que esta instancia no debe fabricar."""
-    __tablename__ = "order_blacklist"
-
-    order_id: Mapped[int] = mapped_column(Integer, primary_key=True)
-    created_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), nullable=False, default=utcnow)
-    reason: Mapped[str | None] = mapped_column(Text, nullable=True)

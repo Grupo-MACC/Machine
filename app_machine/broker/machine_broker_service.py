@@ -52,7 +52,7 @@ MACHINE_PIECE_TYPE = os.getenv("MACHINE_PIECE_TYPE", "A")  # "A" o "B"
 SERVICE_ID = os.getenv("SERVICE_ID", "machine-1")
 
 # Routing key que esta instancia consume (machine.a o machine.b)
-RK_CMD_DO_PIECE = f"machine.{MACHINE_PIECE_TYPE.lower()}"
+RK_CMD_DO_PIECE = f"todo.machine.{MACHINE_PIECE_TYPE.lower()}"
 
 # Cola compartida entre réplicas del mismo tipo (competición)
 QUEUE_DO_PIECE = f"machine_{MACHINE_PIECE_TYPE.lower()}_queue"
@@ -239,10 +239,15 @@ async def handle_cmd_machine_cancel(message) -> None:
 
         logger.warning("[MACHINE] 🛑 Cancel registrada en blacklist: order_id=%s", order_id)
 
-        payload = {"order_id": order_id}
+        payload = {
+            "order_id": order_id, 
+            "machine_type": MACHINE_PIECE_TYPE
+            }
+        
         if saga_id is not None:
             payload["saga_id"] = str(saga_id)
 
+        logger.info("[MACHINE] 📣 Publicando evt.machine.canceled: %s", payload)
         await _publish_exchange(routing_key=RK_EVT_MACHINE_CANCELED, payload=payload)
 
 

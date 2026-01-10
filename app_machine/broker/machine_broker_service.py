@@ -13,7 +13,7 @@ RabbitMQ broker para Machine.
     - order_id
     - piece_id
     - piece_type
-    - manufacturing_date (UTC ahora)
+    - fabrication_date (UTC ahora)
 """
 
 import asyncio
@@ -113,12 +113,12 @@ async def handle_do_pieces(message):
         # 2) Blacklist: si cancelada, ACK y fuera
         if await machine.is_order_blacklisted(int(order_id)):
             logger.info("[MACHINE] 🚫 Order %s cancelada → skip piece %s", order_id, piece_id)
-            # Opcional: registrar SKIPPED lo hace manufacture_piece también, pero aquí ya lo sabemos
-            await machine.manufacture_piece(int(order_id), piece_id, piece_type, order_date)
+            # Opcional: registrar SKIPPED lo hace fabricate_piece también, pero aquí ya lo sabemos
+            await machine.fabricate_piece(int(order_id), piece_id, piece_type, order_date)
             return
 
-        # 3) Fabricar (persistirá inflight + manufactured)
-        done_event = await machine.manufacture_piece(int(order_id), piece_id, piece_type, order_date)
+        # 3) Fabricar (persistirá inflight + fabricated)
+        done_event = await machine.fabricate_piece(int(order_id), piece_id, piece_type, order_date)
 
         # Si decide no fabricar (blacklist o duplicado), no publicamos
         if not done_event or done_event.get("result") != "MANUFACTURED":

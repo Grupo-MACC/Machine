@@ -14,7 +14,7 @@ Este microservicio representa una **máquina** capaz de fabricar **piezas tipo A
    - La máquina valida que el `piece_type` recibido coincide con su tipo configurado.
 3. **Simula la fabricación** (con un `sleep` aleatorio configurable).
 4. **Publica el evento de pieza terminada** en RabbitMQ:
-   - Salida: routing key `piece.done` con `{order_id, piece_id, piece_type, manufacturing_date}`.
+   - Salida: routing key `piece.done` con `{order_id, piece_id, piece_type, fabrication_date}`.
 5. **Escucha eventos de Auth** (`auth.running` / `auth.not_running`):
    - Cuando recibe `auth.running`, **descubre Auth por Consul**, descarga `/auth/public-key` y la guarda en disco.
    - Esto habilita la validación de JWT de los endpoints protegidos.
@@ -108,7 +108,7 @@ Body JSON publicado:
   "order_id": 123,
   "piece_id": "uuid-o-string",
   "piece_type": "A",
-  "manufacturing_date": "2025-12-25T10:16:02.123456Z"
+  "fabrication_date": "2025-12-25T10:16:02.123456Z"
 }
 ```
 
@@ -267,7 +267,7 @@ entrypoint.sh
 ## Roadmap sugerido (lo siguiente que tiene sentido implementar)
 
 1. **Persistencia por máquina (SQLite/Postgres)**
-   - Registrar cada pieza fabricada: `order_id`, `piece_id`, `order_date`, `manufacturing_date`.
+   - Registrar cada pieza fabricada: `order_id`, `piece_id`, `order_date`, `fabrication_date`.
 2. **Reanudación tras apagado**
    - Persistir la `working_piece` y reintentar al arrancar.
 3. **Blacklist por order_id**

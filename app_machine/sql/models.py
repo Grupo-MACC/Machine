@@ -4,7 +4,7 @@
 Modelos SQLAlchemy para Machine.
 
 Tablas:
-- manufactured_piece: histórico de piezas finalizadas (y opcionalmente saltadas).
+- fabricated_piece: histórico de piezas finalizadas (y opcionalmente saltadas).
 - inflight_piece: estado persistente de la pieza en curso (1 fila).
 """
 
@@ -21,7 +21,7 @@ def utcnow() -> datetime:
 
 class ManufacturedPiece(BaseModel):
     """Histórico de piezas procesadas por esta instancia."""
-    __tablename__ = "manufactured_piece"
+    __tablename__ = "fabricated_piece"
 
     id: Mapped[int] = mapped_column(Integer, primary_key=True, autoincrement=True)
 
@@ -30,7 +30,7 @@ class ManufacturedPiece(BaseModel):
     piece_type: Mapped[str] = mapped_column(String(1), nullable=False)  # 'A' o 'B'
 
     order_date: Mapped[datetime | None] = mapped_column(DateTime(timezone=True), nullable=True)
-    manufacturing_date: Mapped[datetime | None] = mapped_column(DateTime(timezone=True), nullable=True)
+    fabrication_date: Mapped[datetime | None] = mapped_column(DateTime(timezone=True), nullable=True)
 
     # Útil para reinicios: saber si ya publicaste el evento piece.done
     done_published: Mapped[bool] = mapped_column(Boolean, nullable=False, default=False)

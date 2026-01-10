@@ -16,7 +16,7 @@ class Message(BaseModel):
 class OrderBase(BaseModel):
     """Order base schema definition."""
     number_of_pieces: int = Field(
-        description="Number of pieces to manufacture for the new order",
+        description="Number of pieces to fabricate for the new order",
         default=None,
         example=10
     )
@@ -52,8 +52,8 @@ class PieceBase(BaseModel):
         description="Piece identifier (Primary key)",
         example="1"
     )
-    manufacturing_date: Optional[datetime] = Field(
-        description="Date when piece has been manufactured",
+    fabrication_date: Optional[datetime] = Field(
+        description="Date when piece has been fabricated",
         example="2022-07-22T17:32:32.193211"
     )
     status: str = Field(
@@ -83,7 +83,7 @@ class ManufacturedPieceOut(BaseModel):
     order_id: int = Field(..., description="ID de la orden")
     piece_type: str = Field(..., description="Tipo de pieza (A/B)")
     order_date: Optional[datetime] = Field(None, description="Fecha de la orden")
-    manufacturing_date: Optional[datetime] = Field(None, description="Fecha de fabricación")
+    fabrication_date: Optional[datetime] = Field(None, description="Fecha de fabricación")
     done_published: bool = Field(..., description="Si se publicó piece.done")
     result: str = Field(..., description="MANUFACTURED o SKIPPED")
     reason: Optional[str] = Field(None, description="Motivo si no se fabricó")
@@ -94,7 +94,7 @@ class OrderSummaryOut(BaseModel):
     Resumen de producción agrupado por order_id.
     """
     order_id: int
-    manufactured_count: int
+    fabricated_count: int
 
 
 class InflightPieceOut(BaseModel):

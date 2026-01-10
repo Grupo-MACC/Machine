@@ -1,307 +1,382 @@
-# app_machine/broker/machine_broker_service.py
-"""
-RabbitMQ broker para Machine.
+# -*- coding: utf-8 -*-
+"""RabbitMQ broker para Machine.
 
-- Warehouse publica 1 pieza por mensaje a routing keys:
-    - machine.a  (piezas tipo A)
-    - machine.b  (piezas tipo B)
-- Machine consume SOLO su tipo.
-- Consumo justo entre réplicas:
-    - QoS prefetch_count=1
-    - ACK SOLO cuando termina la fabricación
-- Al terminar, publica en `piece.done`:
-    - order_id
-    - piece_id
-    - piece_type
-    - fabrication_date (UTC ahora)
+Contrato (manteniendo funcionalidad original):
+    - Warehouse publica 1 pieza por mensaje:
+        * machine.a (piezas tipo A)
+        * machine.b (piezas tipo B)
+      Machine consume SOLO el tipo configurado por entorno.
+    - Reparto justo entre réplicas:
+        * QoS prefetch_count=1
+        * ACK SOLO cuando termina la fabricación (salida del context manager)
+    - Al terminar fabricación publica:
+        * piece.done (payload devuelto por Machine.fabricate_piece)
+    - SAGA cancelación fabricación:
+        * consume cmd.machine.cancel
+        * añade order_id a blacklist (DB compartida)
+        * publica evt.machine.canceled como confirmación a Warehouse
+    - Auth events:
+        * consume auth.running / auth.not_running
+        * si running, descarga public-key y la guarda en PUBLIC_KEY_PATH
+    - Logger:
+        * publica logs estructurados a exchange_logs
 """
+
+from __future__ import annotations
 
 import asyncio
 import json
 import logging
 import os
-from aio_pika import Message
-
-from microservice_chassis_grupo2.core.rabbitmq_core import (
-    get_channel,
-    declare_exchange,
-    PUBLIC_KEY_PATH,
-    declare_exchange_logs,
-)
 
 import httpx
+from aio_pika import Message
+
 from consul_client import get_service_url
 from dependencies import get_machine
+from microservice_chassis_grupo2.core.rabbitmq_core import (
+    PUBLIC_KEY_PATH,
+    declare_exchange,
+    declare_exchange_logs,
+    get_channel,
+)
 
 logger = logging.getLogger(__name__)
 
-# ----------------------------- Config Rabbit ---------------------------------
-# Configuración por entorno: permite reutilizar el MISMO código
-# para machine-A / machine-B y para réplicas sin tocar el source.
-# -----------------------------------------------------------------------------
-MACHINE_PIECE_TYPE = os.getenv("MACHINE_PIECE_TYPE", "A")  # "A" o "B"
-MACHINE_ROUTING_KEY = os.getenv("MACHINE_ROUTING_KEY", f"machine.{MACHINE_PIECE_TYPE.lower()}")
-MACHINE_QUEUE_NAME = os.getenv("MACHINE_QUEUE_NAME", f"machine_{MACHINE_PIECE_TYPE.lower()}_queue")
+# =============================================================================
+# 0) CONFIG / CONSTANTES (único punto de control)
+# =============================================================================
 
+# --- Config por entorno (mismo código para machine-A / machine-B) ---
+MACHINE_PIECE_TYPE = os.getenv("MACHINE_PIECE_TYPE", "A")  # "A" o "B"
 SERVICE_ID = os.getenv("SERVICE_ID", "machine-1")
 
-# Cada instancia debe tener SU cola para recibir TODOS los cancel events
-CANCEL_QUEUE_NAME = os.getenv("CANCEL_QUEUE_NAME", f"machine_cancel_{SERVICE_ID}")
+# Routing key que esta instancia consume (machine.a o machine.b)
+RK_CMD_DO_PIECE = f"machine.{MACHINE_PIECE_TYPE.lower()}"
 
-# SAGA cancelación fabricación (Warehouse -> Machine -> Warehouse)
+# Cola compartida entre réplicas del mismo tipo (competición)
+QUEUE_DO_PIECE = f"machine_{MACHINE_PIECE_TYPE.lower()}_queue"
+
+# --- Eventos y comandos de la SAGA cancelación (Warehouse -> Machine -> Warehouse) ---
 RK_CMD_MACHINE_CANCEL = "cmd.machine.cancel"
 RK_EVT_MACHINE_CANCELED = "evt.machine.canceled"
 
-# Cola COMPARTIDA entre réplicas: solo una consume cada mensaje
-MACHINE_CANCEL_QUEUE = "machine_cancel_queue"
+# Cola compartida entre réplicas: solo 1 procesa cada cmd.machine.cancel
+QUEUE_MACHINE_CANCEL = "machine_cancel_queue"
+
+# --- Evento de pieza terminada (Machine -> Warehouse) ---
+RK_EVT_PIECE_DONE = "piece.done"
+
+# --- Auth events (exchange general) ---
+RK_AUTH_RUNNING = "auth.running"
+RK_AUTH_NOT_RUNNING = "auth.not_running"
+QUEUE_AUTH_EVENTS = "machine_queue"  # se mantiene por compatibilidad (nombre histórico)
+
+# --- Logger topics ---
+TOPIC_INFO = "machine.info"
+TOPIC_ERROR = "machine.error"
+TOPIC_DEBUG = "machine.debug"
 
 
+# =============================================================================
+# 1) HELPERS internos (publicación consistente)
+# =============================================================================
 #region 0. HELPERS
-async def publish_message(topic: str, message: dict):
-    """
-    Publica un mensaje en el exchange con la routing key dada.
-    Arguments:
-        - topic: routing key
-        - message: dict con el contenido
+def _build_json_message(payload: dict) -> Message:
+    """Construye un mensaje JSON persistente."""
+    return Message(
+        body=json.dumps(payload).encode(),
+        content_type="application/json",
+        delivery_mode=2,  # persistente
+    )
+
+
+async def _publish_exchange(routing_key: str, payload: dict) -> None:
+    """Publica un payload JSON al exchange general (declare_exchange).
+
+    Nota:
+        Mantengo el mismo exchange que tu versión original para no cambiar
+        semántica/infra de routing.
     """
     connection, channel = await get_channel()
-    
-    exchange = await declare_exchange(channel)
-
-    msg = Message(body=json.dumps(message).encode(), content_type="application/json", delivery_mode=2)
-    await exchange.publish(message=msg, routing_key=topic)
-
-    await connection.close()
+    try:
+        exchange = await declare_exchange(channel)
+        await exchange.publish(message=_build_json_message(payload), routing_key=routing_key)
+    finally:
+        await connection.close()
 
 
-#region 1. PIECE DO
-# ---------- HANDLER: consume piezas UNA A UNA ----------
-async def handle_do_pieces(message):
-    """
-    Consume mensajes con UNA pieza por mensaje.
+def _require_fields(data: dict, required: tuple[str, ...], context: str) -> bool:
+    """Valida que existan campos obligatorios en el payload."""
+    missing = [k for k in required if data.get(k) is None]
+    if not missing:
+        return True
+    logger.error("[MACHINE] ❌ Payload inválido en %s (faltan %s): %s", context, missing, data)
+    return False
 
-    Contrato esperado desde Warehouse:
-      - piece_id (str UUID)
-      - order_id (int)
-      - piece_type ('A'|'B')
-      - order_date (ISO str)  -> de momento no se usa, pero se acepta.
 
-    IMPORTANTE:
-    - Aquí NO se hace ACK hasta que termina la fabricación (sale del context manager).
-    - Con prefetch_count=1, esta instancia no recibirá otro mensaje mientras fabrica.
+# =============================================================================
+# 2) HANDLER: DO PIECES (Warehouse -> Machine)
+# =============================================================================
+#region 1. FABRICATION
+async def handle_do_pieces(message) -> None:
+    """Consume 1 pieza por mensaje y publica `piece.done` cuando se fabrica.
+
+    Contrato esperado (Warehouse):
+        - piece_id: str UUID
+        - order_id: int
+        - piece_type: 'A'|'B'
+        - order_date: str ISO (opcional; hoy no se usa pero se acepta)
+
+    Propiedades importantes:
+        - ACK al final del bloque `async with message.process()`:
+          si fabricas lento, no se ACKea hasta terminar.
+        - prefetch_count=1: reparto justo entre réplicas.
     """
     async with message.process():
         data = json.loads(message.body)
 
-        piece_id = data.get("piece_id")
-        order_id = data.get("order_id")
-        piece_type = data.get("piece_type")
-        order_date = data.get("order_date")  # futuro: logging / DB
+        if not _require_fields(data, ("piece_id", "order_id", "piece_type"), context="do_piece"):
+            return
 
-        # Validación mínima
-        if not piece_id or order_id is None or piece_type not in ("A", "B"):
-            logger.error("[MACHINE] ❌ Mensaje inválido: %s", data)
+        piece_id = data.get("piece_id")
+        order_id = int(data.get("order_id"))
+        piece_type = data.get("piece_type")
+        order_date = data.get("order_date")
+
+        if piece_type not in ("A", "B"):
+            logger.error("[MACHINE] ❌ piece_type inválido: %s (data=%s)", piece_type, data)
             return
 
         machine = await get_machine()
 
-        # 1) Idempotencia: si ya está procesada, ACK y fuera
+        # 1) Idempotencia: si ya está procesada, ACK y fuera (no republish)
         if await machine.is_piece_already_processed(piece_id):
             logger.info("[MACHINE] ♻️ Duplicado piece_id=%s → ACK sin publicar", piece_id)
             return
 
-        # 2) Blacklist: si cancelada, ACK y fuera
-        if await machine.is_order_blacklisted(int(order_id)):
+        # 2) Blacklist: si la order está cancelada, registrar/consumir sin publicar
+        if await machine.is_order_blacklisted(order_id):
             logger.info("[MACHINE] 🚫 Order %s cancelada → skip piece %s", order_id, piece_id)
-            # Opcional: registrar SKIPPED lo hace fabricate_piece también, pero aquí ya lo sabemos
-            await machine.fabricate_piece(int(order_id), piece_id, piece_type, order_date)
+            # Mantengo tu comportamiento: llamas fabricate_piece (posible registro SKIPPED)
+            await machine.fabricate_piece(order_id, piece_id, piece_type, order_date)
             return
 
         # 3) Fabricar (persistirá inflight + fabricated)
-        done_event = await machine.fabricate_piece(int(order_id), piece_id, piece_type, order_date)
+        done_event = await machine.fabricate_piece(order_id, piece_id, piece_type, order_date)
 
-        # Si decide no fabricar (blacklist o duplicado), no publicamos
+        # Si decide no fabricar (blacklist/duplicado), no publicamos
         if not done_event or done_event.get("result") != "MANUFACTURED":
             return
 
-        # 4) Publicar evento
-        await publish_message(topic="piece.done", message=done_event)
+        # 4) Publicar evento de pieza fabricada
+        await _publish_exchange(routing_key=RK_EVT_PIECE_DONE, payload=done_event)
 
         # 5) Marcar como publicado en DB
         await machine.mark_done_published(piece_id)
 
 
-# ---------- CONSUMER BOOT ----------
-async def consume_do_pieces_events():
+async def consume_do_pieces_events() -> None:
+    """Arranca el consumer del tipo configurado (A/B).
+
+    Claves para reparto justo:
+        - prefetch_count=1
+        - ACK al final del handler
     """
-    Arranca el consumer del tipo de machine configurado.
+    connection, channel = await get_channel()
+    try:
+        await channel.set_qos(prefetch_count=1)  # CRÍTICO
 
-    Claves para que haya reparto justo entre réplicas:
-    - prefetch_count=1
-    - ACK al final (cuando termina fabricación)
-    """
-    _, channel = await get_channel()
-    await channel.set_qos(prefetch_count=1)  # <- CRÍTICO
+        exchange = await declare_exchange(channel)
 
-    exchange = await declare_exchange(channel)
+        queue = await channel.declare_queue(QUEUE_DO_PIECE, durable=True)
+        await queue.bind(exchange, routing_key=RK_CMD_DO_PIECE)
+        await queue.consume(handle_do_pieces)
 
-    # CRÍTICO: cola diferente por tipo (A/B), pero compartida entre réplicas del mismo tipo
-    queue = await channel.declare_queue(MACHINE_QUEUE_NAME, durable=True)
-    await queue.bind(exchange, routing_key=MACHINE_ROUTING_KEY)
+        logger.info(
+            "[MACHINE-%s] 🟢 Escuchando '%s' en cola '%s' …",
+            MACHINE_PIECE_TYPE,
+            RK_CMD_DO_PIECE,
+            QUEUE_DO_PIECE,
+        )
 
-    await queue.consume(handle_do_pieces)
+        await publish_to_logger(
+            message={"message": "Escuchando piezas", "routing_key": RK_CMD_DO_PIECE, "queue": QUEUE_DO_PIECE},
+            topic=TOPIC_INFO,
+        )
 
-    logger.info("[MACHINE-%s] 🟢 Escuchando '%s' en cola '%s' …", MACHINE_PIECE_TYPE, MACHINE_ROUTING_KEY, MACHINE_QUEUE_NAME)
-    await publish_to_logger(
-        message={"message": "Escuchando piezas", "routing_key": MACHINE_ROUTING_KEY, "queue": MACHINE_QUEUE_NAME},
-        topic="machine.info",
-    )
-
-    await asyncio.Future()
+        await asyncio.Future()
+    finally:
+        # Normalmente no se llega (Future infinito)
+        await connection.close()
 
 
-#region 2. ORDER CANCEL
-async def handle_cmd_machine_cancel(message):
-    """
-    Consumer del comando cmd.machine.cancel.
+# =============================================================================
+# 3) HANDLER: CANCEL (Warehouse -> Machine -> Warehouse)
+# =============================================================================
+#region 2. CANCEL SAGA
+async def handle_cmd_machine_cancel(message) -> None:
+    """Procesa cmd.machine.cancel.
 
     Payload esperado:
         {"order_id": int, "saga_id": str (opcional)}
 
     Efecto:
-        - Inserta order_id en blacklist COMPARTIDA (DB).
-        - Publica evt.machine.canceled como confirmación (SAGA).
+        - Inserta order_id en blacklist (DB compartida).
+        - Publica evt.machine.canceled como confirmación hacia Warehouse.
     """
     async with message.process():
         data = json.loads(message.body)
-        order_id = data.get("order_id")
-        saga_id = data.get("saga_id")
 
-        if order_id is None:
-            logger.error("[MACHINE] ❌ cmd.machine.cancel inválido: %s", data)
+        if not _require_fields(data, ("order_id",), context=RK_CMD_MACHINE_CANCEL):
             return
 
+        order_id = int(data.get("order_id"))
+        saga_id = data.get("saga_id")
+
         machine = await get_machine()
-        await machine.add_to_blacklist(int(order_id), reason="CANCEL_MANUFACTURING")
+        await machine.add_to_blacklist(order_id, reason="CANCEL_MANUFACTURING")
 
-        logger.warning("[MACHINE] 🛑 Cancel registrada en blacklist compartida: order_id=%s", order_id)
+        logger.warning("[MACHINE] 🛑 Cancel registrada en blacklist: order_id=%s", order_id)
 
-        # Confirmación hacia Warehouse (SAGA)
-        payload = {"order_id": int(order_id)}
+        payload = {"order_id": order_id}
         if saga_id is not None:
             payload["saga_id"] = str(saga_id)
 
-        await publish_message(
-            topic=RK_EVT_MACHINE_CANCELED,
-            message=payload,
-        )
+        await _publish_exchange(routing_key=RK_EVT_MACHINE_CANCELED, payload=payload)
 
 
-async def consume_cmd_machine_cancel():
-    """
-    Escucha cmd.machine.cancel en una cola compartida.
+async def consume_cmd_machine_cancel() -> None:
+    """Escucha cmd.machine.cancel en una cola compartida.
 
     Semántica:
-        - Varias réplicas compiten por la misma cola -> solo una procesa el comando.
+        - Réplicas compiten por la cola -> solo una procesa el comando.
         - Como la blacklist está en BD compartida, el efecto es global.
     """
-    _, channel = await get_channel()
-    exchange = await declare_exchange(channel)
+    connection, channel = await get_channel()
+    try:
+        exchange = await declare_exchange(channel)
 
-    queue = await channel.declare_queue(MACHINE_CANCEL_QUEUE, durable=True)
-    await queue.bind(exchange, routing_key=RK_CMD_MACHINE_CANCEL)
+        queue = await channel.declare_queue(QUEUE_MACHINE_CANCEL, durable=True)
+        await queue.bind(exchange, routing_key=RK_CMD_MACHINE_CANCEL)
+        await queue.consume(handle_cmd_machine_cancel)
 
-    await queue.consume(handle_cmd_machine_cancel)
+        logger.info(
+            "[MACHINE] 🟠 Escuchando '%s' en cola '%s' (competing consumers)",
+            RK_CMD_MACHINE_CANCEL,
+            QUEUE_MACHINE_CANCEL,
+        )
 
-    logger.info("[MACHINE] 🟠 Escuchando '%s' en cola '%s' (competing consumers)", RK_CMD_MACHINE_CANCEL, MACHINE_CANCEL_QUEUE)
+        await publish_to_logger(
+            message={"message": "Escuchando cmd.machine.cancel", "routing_key": RK_CMD_MACHINE_CANCEL, "queue": QUEUE_MACHINE_CANCEL},
+            topic=TOPIC_INFO,
+        )
 
-    await asyncio.Future()
+        await asyncio.Future()
+    finally:
+        await connection.close()
 
 
+# =============================================================================
+# 4) AUTH EVENTS (Auth -> Machine)
+# =============================================================================
+#region 3. AUTH EVENTS
+async def handle_auth_events(message) -> None:
+    """Consume auth.running/auth.not_running.
 
-
-#region 3. AUTH EVENTS    
-async def consume_auth_events():
-    _, channel = await get_channel()
-    
-    exchange = await declare_exchange(channel)
-    
-    machine_queue = await channel.declare_queue('machine_queue', durable=True)
-    await machine_queue.bind(exchange, routing_key="auth.running")
-    await machine_queue.bind(exchange, routing_key="auth.not_running")
-    
-    await machine_queue.consume(handle_auth_events)
-    logger.info("[MACHINE] 🟢 Escuchando eventos de auth (running/not_running)...")
-    await publish_to_logger(
-        message={"message": "Escuchando eventos de auth"},
-        topic="machine.info",
-    )
-
-async def handle_auth_events(message):
+    Solo cuando status == 'running':
+        - Descubre Auth via Consul
+        - Descarga public key
+        - Guarda en PUBLIC_KEY_PATH
+    """
     async with message.process():
         data = json.loads(message.body)
-        if data["status"] == "running":
-            try:
-                # Use Consul to discover auth service (no fallback)
-                auth_service_url = await get_service_url("auth")
-                logger.info(f"[MACHINE] 🔍 Auth descubierto via Consul: {auth_service_url}")
-                
-                async with httpx.AsyncClient() as client:
-                    response = await client.get(
-                        f"{auth_service_url}/auth/public-key"
-                    )
-                    response.raise_for_status()
-                    public_key = response.text
-                    
-                    with open(PUBLIC_KEY_PATH, "w", encoding="utf-8") as f:
-                        f.write(public_key)
-                    
-                    logger.info(f"✅ Clave pública de Auth guardada en {PUBLIC_KEY_PATH}")
-                    await publish_to_logger(
-                        message={
-                            "message": "Clave pública de Auth guardada",
-                            "path": PUBLIC_KEY_PATH,
-                        },
-                        topic="machine.info",
-                    )
-            except Exception as exc:
-                logger.error(f"[MACHINE] ❌ Error obteniendo clave pública de Auth: {exc}")
-                await publish_to_logger(
-                    message={
-                        "message": "Error obteniendo clave pública de Auth",
-                        "error": str(exc),
-                    },
-                    topic="machine.error",
-                )
+
+        status = data.get("status")
+        if status != "running":
+            return
+
+        try:
+            auth_service_url = await get_service_url("auth")
+            logger.info("[MACHINE] 🔍 Auth descubierto via Consul: %s", auth_service_url)
+
+            async with httpx.AsyncClient() as client:
+                response = await client.get(f"{auth_service_url}/auth/public-key")
+                response.raise_for_status()
+                public_key = response.text
+
+            with open(PUBLIC_KEY_PATH, "w", encoding="utf-8") as f:
+                f.write(public_key)
+
+            logger.info("[MACHINE] ✅ Clave pública de Auth guardada en %s", PUBLIC_KEY_PATH)
+            await publish_to_logger(
+                message={"message": "Clave pública de Auth guardada", "path": PUBLIC_KEY_PATH},
+                topic=TOPIC_INFO,
+            )
+        except Exception as exc:
+            logger.error("[MACHINE] ❌ Error obteniendo clave pública de Auth: %s", exc, exc_info=True)
+            await publish_to_logger(
+                message={"message": "Error obteniendo clave pública de Auth", "error": str(exc)},
+                topic=TOPIC_ERROR,
+            )
 
 
-#region 4. LOGGER
-async def publish_to_logger(message: dict, topic: str):
+async def consume_auth_events() -> None:
+    """Consumer de auth.running/auth.not_running.
+
+    Importante:
+        En tu versión original este consumer NO bloqueaba (faltaba Future),
+        lo que puede dejarlo inactivo si se ejecuta como task.
     """
-    Envía un log estructurado al sistema de logs.
-    topic: 'machine.info', 'machine.error', 'machine.debug', etc.
+    connection, channel = await get_channel()
+    try:
+        exchange = await declare_exchange(channel)
+
+        queue = await channel.declare_queue(QUEUE_AUTH_EVENTS, durable=True)
+        await queue.bind(exchange, routing_key=RK_AUTH_RUNNING)
+        await queue.bind(exchange, routing_key=RK_AUTH_NOT_RUNNING)
+        await queue.consume(handle_auth_events)
+
+        logger.info("[MACHINE] 🟢 Escuchando eventos de auth (running/not_running) en %s", QUEUE_AUTH_EVENTS)
+        await publish_to_logger(
+            message={"message": "Escuchando eventos de auth", "queue": QUEUE_AUTH_EVENTS},
+            topic=TOPIC_INFO,
+        )
+
+        await asyncio.Future()
+    finally:
+        await connection.close()
+
+
+# =============================================================================
+# 5) LOGGER
+# =============================================================================
+#region 4. LOGGER
+async def publish_to_logger(message: dict, topic: str) -> None:
+    """Envía un log estructurado al sistema de logs.
+
+    Args:
+        message: dict con campos extra.
+        topic: 'machine.info' | 'machine.error' | 'machine.debug' | ...
     """
     connection = None
     try:
         connection, channel = await get_channel()
         exchange = await declare_exchange_logs(channel)
 
+        service, severity = (topic.split(".", 1) + ["info"])[:2]
+
         log_data = {
             "measurement": "logs",
-            "service": topic.split(".")[0],   # 'machine'
-            "severity": topic.split(".")[1],  # 'info', 'error', 'debug'...
+            "service": service,
+            "severity": severity,
             **message,
         }
 
-        msg = Message(
-            body=json.dumps(log_data).encode(),
-            content_type="application/json",
-            delivery_mode=2,
-        )
+        await exchange.publish(message=_build_json_message(log_data), routing_key=topic)
 
-        await exchange.publish(message=msg, routing_key=topic)
-    except Exception as e:
-        print(f"[MACHINE] Error publishing to logger: {e}")
+    except Exception:
+        logger.exception("[MACHINE] Error publicando al logger")
     finally:
         if connection:
             await connection.close()

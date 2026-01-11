@@ -44,7 +44,7 @@ from microservice_chassis_grupo2.core.rabbitmq_core import (
 logger = logging.getLogger(__name__)
 
 # =============================================================================
-# 0) CONFIG / CONSTANTES (único punto de control)
+# Constantes RabbitMQ (routing keys / colas / topics)
 # =============================================================================
 
 # --- Config por entorno (mismo código para machine-A / machine-B) ---

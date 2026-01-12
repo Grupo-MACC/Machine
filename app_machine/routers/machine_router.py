@@ -60,7 +60,7 @@ async def get_machine_status(
 
 
 @router.get("/pieces", response_model=List[schemas.ManufacturedPieceOut])
-async def list_manufactured_pieces(
+async def list_fabricated_pieces(
     order_id: Optional[int] = Query(default=None, description="Filtrar por order_id"),
     result: Optional[str] = Query(default=None, description="Filtrar por result (MANUFACTURED/SKIPPED)"),
     limit: int = Query(default=100, ge=1, le=500, description="Límite de filas"),
@@ -115,7 +115,7 @@ async def list_orders_summary(
     q = (
         select(
             ManufacturedPiece.order_id.label("order_id"),
-            func.count(ManufacturedPiece.id).label("manufactured_count"),
+            func.count(ManufacturedPiece.id).label("fabricated_count"),
         )
         .where(ManufacturedPiece.result == "MANUFACTURED")
         .group_by(ManufacturedPiece.order_id)
@@ -125,7 +125,7 @@ async def list_orders_summary(
     )
 
     rows = (await db.execute(q)).all()
-    return [{"order_id": r.order_id, "manufactured_count": r.manufactured_count} for r in rows]
+    return [{"order_id": r.order_id, "fabricated_count": r.fabricated_count} for r in rows]
 
 
 @router.get("/inflight", response_model=Optional[schemas.InflightPieceOut])

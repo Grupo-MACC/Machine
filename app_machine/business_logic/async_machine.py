@@ -5,7 +5,7 @@ Lógica de fabricación con persistencia e idempotencia.
 
 Incluye:
 - Guardado de pieza en curso (inflight_piece) para reanudar tras reinicio.
-- Guardado de piezas finalizadas (manufactured_piece).
+- Guardado de piezas finalizadas (fabricated_piece).
 - Blacklist local (order_blacklist) para saltar órdenes canceladas.
 - Idempotencia por piece_id: si ya está registrada como procesada, no se refabrica.
 
@@ -142,7 +142,7 @@ class Machine:
 
     #region 1.2 db pieces
     async def is_piece_already_processed(self, piece_id: str) -> bool:
-        """True si esta instancia ya registró esa piece_id en manufactured_piece."""
+        """True si esta instancia ya registró esa piece_id en fabricated_piece."""
         async with db_session() as session:
             q = select(ManufacturedPiece).where(ManufacturedPiece.piece_id == piece_id)
             row = (await session.execute(q)).scalar_one_or_none()
@@ -168,7 +168,7 @@ class Machine:
 
         Limitación importante (realista):
         - Con varias réplicas, el mensaje puede haberse reentregado a otra instancia y fabricado ya.
-          Por eso usamos piece_id UNIQUE e idempotencia: si ya está en manufactured_piece, no rehacemos.
+          Por eso usamos piece_id UNIQUE e idempotencia: si ya está en fabricated_piece, no rehacemos.
         """
         if not self._resume_on_boot:
             return None
@@ -220,14 +220,14 @@ class Machine:
         return done_event
 
     #region 1.4 main process
-    async def manufacture_piece(self, order_id: int, piece_id: str, piece_type: str, order_date: str | None) -> dict | None:
+    async def fabricate_piece(self, order_id: int, piece_id: str, piece_type: str, order_date: str | None) -> dict | None:
         """
         Fabrica una pieza con persistencia.
 
         - Si order_id está en blacklist: no fabrica (y opcionalmente registra SKIPPED).
         - Si piece_id ya está registrada: no fabrica (idempotencia).
         - Guarda inflight antes de dormir (para resume).
-        - Al terminar, guarda manufactured_piece con done_published=False.
+        - Al terminar, guarda fabricated_piece con done_published=False.
           (El broker marcará done_published=True tras publicar en RabbitMQ).
 
         Devuelve:
@@ -315,7 +315,7 @@ class Machine:
         Nota:
         - done_published se deja en False para que el broker lo marque a True tras publicar.
         """
-        manufactured_at_dt = datetime.now(timezone.utc)
+        fabricated_at_dt = datetime.now(timezone.utc)
         order_date_dt = parse_iso_to_dt(order_date)
 
         async with db_session() as session:
@@ -325,7 +325,7 @@ class Machine:
                     order_id=order_id,
                     piece_type=piece_type,
                     order_date=order_date_dt,
-                    manufacturing_date=(manufactured_at_dt if result == "MANUFACTURED" else None),
+                    fabrication_date=(fabricated_at_dt if result == "MANUFACTURED" else None),
                     done_published=False,
                     result=result,
                     reason=reason,
@@ -345,7 +345,7 @@ class Machine:
             "piece_id": piece_id,
             "piece_type": piece_type,
             "order_date": order_date,
-            "manufacturing_date": utc_now_iso(),
+            "fabrication_date": utc_now_iso(),
             "result": result,
             "reason": reason,
             "from_resume": from_resume,

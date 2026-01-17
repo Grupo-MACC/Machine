@@ -3,7 +3,7 @@ import httpx
 from typing import List
 from dependencies import get_machine
 from sql import schemas
-from consul_client import get_service_url
+from consul_client import get_consul_client
 
 logger = logging.getLogger(__name__)
 

@@ -47,7 +47,6 @@ async def lifespan(__app: FastAPI):
         except Exception as e:
             logger.error(f"Error lanzando payment broker service: {e}")
         
-        await machine_broker_service.ensure_auth_public_key()
 
         yield
     finally:

@@ -47,6 +47,11 @@ logger = logging.getLogger(__name__)
 # Constantes RabbitMQ (routing keys / colas / topics)
 # =============================================================================
 
+# Identidad de instancia (útil para colas por réplica)
+INSTANCE_ID = os.getenv("SERVICE_ID") or os.getenv("HOSTNAME", "machine")
+# Cola por-réplica para eventos de Auth (NO durable, auto-delete)
+QUEUE_AUTH_EVENTS = os.getenv("QUEUE_AUTH_EVENTS") or f"machine_auth_{INSTANCE_ID}"
+
 # --- Config por entorno (mismo código para machine-A / machine-B) ---
 MACHINE_PIECE_TYPE = os.getenv("MACHINE_PIECE_TYPE", "A")  # "A" o "B"
 SERVICE_ID = os.getenv("SERVICE_ID", "machine-1")
@@ -187,6 +192,7 @@ async def _ensure_auth_public_key(max_attempts: int = 20, base_delay: float = 0.
 
     raise RuntimeError("No se pudo obtener la clave pública de Auth tras varios reintentos.")
 
+#region 0.1 replicas
 
 # =============================================================================
 # 2) HANDLER: DO PIECES (Warehouse -> Machine)
@@ -386,31 +392,49 @@ async def handle_auth_events(message) -> None:
             )
 
 
+async def bootstrap_auth_public_key() -> None:
+    """
+    Bootstrap de clave pública de Auth.
+
+    - Se ejecuta al arrancar, en TODAS las réplicas.
+    - Si Auth aún no está listo, reintenta con backoff.
+    - Si al final no se consigue, levanta excepción (fail-fast),
+      porque sin clave pública, tu API protegida por JWT no es fiable.
+    """
+    await _ensure_auth_public_key()
+
+
 async def consume_auth_events() -> None:
-    """Consumer de auth.running/auth.not_running.
+    """
+    Consume eventos sobre el estado de Auth usando cola por-réplica.
 
     Importante:
-        En tu versión original este consumer NO bloqueaba (faltaba Future),
-        lo que puede dejarlo inactivo si se ejecuta como task.
+        - durable=False, exclusive=True, auto_delete=True
+          porque esta cola solo sirve para “notificar” a ESTA instancia.
+        - Aunque el evento se pierda, el bootstrap del arranque lo cubre.
     """
-    connection, channel = await get_channel()
-    try:
-        exchange = await declare_exchange(channel)
+    _, channel = await get_channel()
+    exchange = await declare_exchange(channel)
 
-        queue = await channel.declare_queue(QUEUE_AUTH_EVENTS, durable=True)
-        await queue.bind(exchange, routing_key=RK_AUTH_RUNNING)
-        await queue.bind(exchange, routing_key=RK_AUTH_NOT_RUNNING)
-        await queue.consume(handle_auth_events)
+    auth_queue = await channel.declare_queue(
+        QUEUE_AUTH_EVENTS,
+        durable=False,
+        exclusive=True,
+        auto_delete=True,
+    )
 
-        logger.info("[MACHINE] 🟢 Escuchando eventos de auth (running/not_running) en %s", QUEUE_AUTH_EVENTS)
-        await publish_to_logger(
-            message={"message": "Escuchando eventos de auth", "queue": QUEUE_AUTH_EVENTS},
-            topic=TOPIC_INFO,
-        )
+    await auth_queue.bind(exchange, routing_key=RK_AUTH_RUNNING)
+    await auth_queue.bind(exchange, routing_key=RK_AUTH_NOT_RUNNING)
 
-        await asyncio.Future()
-    finally:
-        await connection.close()
+    async with auth_queue.iterator() as it:
+        async for message in it:
+            async with message.process():
+                payload = json.loads(message.body)
+                status = payload.get("status")
+
+                if status == "running":
+                    logger.info("[MACHINE] 📥 auth.running recibido → refrescando public key")
+                    await _ensure_auth_public_key()
 
 
 

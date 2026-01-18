@@ -39,7 +39,10 @@ async def lifespan(__app: FastAPI):
                 await init_blacklist_db()
         except Exception as exc:
             logger.exception("[MACHINE] ❌ Error creando tablas: %s", exc)
-
+        
+        # Clave pública Auth: imprescindible para endpoints con JWT
+        await machine_broker_service.bootstrap_auth_public_key()
+       
         try:
             task_machine = asyncio.create_task(machine_broker_service.consume_do_pieces_events())
             task_cancel = asyncio.create_task(machine_broker_service.consume_cmd_machine_cancel())

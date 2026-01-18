@@ -34,18 +34,10 @@ logger = logging.getLogger(__name__)
 router = APIRouter(prefix="/machine")
 
 
-@router.get("/health")
-async def health_check():
-    """
-    Healthcheck básico: confirma que el servicio está arriba y con clave pública cargada.
-    """
-    logger.debug("GET '/health' endpoint called.")
-    if check_public_key():
-        return {"detail": "OK"}
-    raise HTTPException(
-        status_code=status.HTTP_503_SERVICE_UNAVAILABLE,
-        detail="Service not available",
-    )
+@router.get("/health", include_in_schema=False)
+async def health() -> dict:
+    """ Healthcheck LIVENESS (para Consul / balanceadores). """
+    return {"detail": "OK"}
 
 
 @router.get("/status")

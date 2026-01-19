@@ -1,0 +1,25 @@
+# certs/machine/machine-san.cnf
+# -------------------------------------------------------------------
+# Cert de servidor para Machine con SAN válido para los DNS internos.
+# -------------------------------------------------------------------
+
+[req]
+default_bits       = 2048
+prompt             = no
+default_md         = sha256
+distinguished_name = dn
+req_extensions     = req_ext
+
+[dn]
+CN = machine
+
+[req_ext]
+subjectAltName = @alt_names
+
+[alt_names]
+DNS.1 = machine-a
+DNS.2 = machine-b
+DNS.3 = machine
+DNS.4 = localhost
+# Si en algún check usas 127.0.0.1 contra Machine, añade:
+# IP.1  = 127.0.0.1

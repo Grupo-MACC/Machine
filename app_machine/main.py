@@ -22,16 +22,24 @@ logger = logging.getLogger(__name__)
 async def lifespan(__app: FastAPI):
     """Lifespan context manager."""
     try:
-        logger.info("Starting up")
 
-        # Creación de tablas
         try:
-            logger.info("[MACHINE] 🗄️ Creando tablas de base de datos")
+            logger.info("Initializing database connection")
+            await database.init_database()
+            logger.info("Database connection initialized")
+        except Exception as e:
+            logger.error(f"Could not initialize database connection: {e}", exc_info=True)
+            with open("/home/pyuser/code/error.txt", "w") as f:
+                f.write(f"{e}\n")
+            raise e
+        
+        try:
+            logger.info("Creating database tables")
             async with database.engine.begin() as conn:
                 await conn.run_sync(models.Base.metadata.create_all)
                 await init_blacklist_db()
-        except Exception as exc:
-            logger.exception("[MACHINE] ❌ Error creando tablas: %s", exc)
+        except Exception:
+            logger.error("Could not create tables at startup")
 
         try:
             task_machine = asyncio.create_task(machine_broker_service.consume_do_pieces_events())

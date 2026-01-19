@@ -1,9 +1,56 @@
 services:
-    machine:
+    machine-a:
         build:
             context: .
             dockerfile: Dockerfile
-        container_name: machine
+        container_name: machine-a
         ports:
             - "5000:5001"
         restart: on-failure
+        environment:
+            - MACHINE_PIECE_TYPE=A
+            - PUBLIC_KEY_PATH=/keys/auth_public.pem # para que las dos machines usen la misma Public Key
+        volumes:
+            - auth-keys:/keys
+        healthcheck:
+            test: ["CMD", "python", "-c", "import ssl,urllib.request;ctx=ssl._create_unverified_context();urllib.request.urlopen('https://127.0.0.1:5001/machine/health', context=ctx, timeout=2)"]
+            interval: 5s
+            timeout: 3s
+            retries: 20
+
+    machine-b:
+        build:
+            context: .
+            dockerfile: Dockerfile
+        container_name: machine-b
+        ports:
+            - "5001:5001"
+        restart: on-failure
+        environment:
+            - MACHINE_PIECE_TYPE=B
+            - PUBLIC_KEY_PATH=/keys/auth_public.pem # para que las dos machines usen la misma Public Key
+        volumes:
+            - auth-keys:/keys
+        healthcheck:
+            test: ["CMD", "python", "-c", "import ssl,urllib.request;ctx=ssl._create_unverified_context();urllib.request.urlopen('https://127.0.0.1:5001/machine/health', context=ctx, timeout=2)"]
+            interval: 5s
+            timeout: 3s
+            retries: 20
+    
+    machine_ready:
+    image: python:3.12-slim-bookworm
+    container_name: machine-ready
+    depends_on:
+      machine_a:
+        condition: service_healthy
+      machine_b:
+        condition: service_healthy
+    ports:
+      - "8080:8080"
+    volumes:
+      - ./ready.py:/ready.py:ro
+    command: ["python", "/ready.py"]
+    restart: on-failure
+
+volumes:
+  auth-keys:

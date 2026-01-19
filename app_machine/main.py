@@ -9,7 +9,6 @@ from fastapi import FastAPI
 from broker import machine_broker_service
 from routers import machine_router
 from sql.blacklist_database import init_blacklist_db
-from consul_client import get_consul_client
 from microservice_chassis_grupo2.sql import database, models
 
 # Configure logging ################################################################################
@@ -22,14 +21,8 @@ logger = logging.getLogger(__name__)
 @asynccontextmanager
 async def lifespan(__app: FastAPI):
     """Lifespan context manager."""
-    consul = get_consul_client()
-
     try:
         logger.info("Starting up")
-        
-        # Registro "auto" (usa SERVICE_* y CONSUL_* desde entorno)
-        ok = await consul.register_self()
-        logger.info("✅ Consul register_self: %s", ok)
 
         # Creación de tablas
         try:
@@ -53,18 +46,6 @@ async def lifespan(__app: FastAPI):
         task_machine.cancel()
         task_cancel.cancel()
         task_auth.cancel()
-        
-        # Deregistro (auto) + cierre del cliente HTTP
-        try:
-            ok = await consul.deregister_self()
-            logger.info("✅ Consul deregister_self: %s", ok)
-        except Exception:
-            logger.exception("Error desregistrando en Consul")
-
-        try:
-            await consul.aclose()
-        except Exception:
-            logger.exception("Error cerrando cliente Consul")
 
 # OpenAPI Documentation ############################################################################
 APP_VERSION = os.getenv("APP_VERSION", "2.0.0")

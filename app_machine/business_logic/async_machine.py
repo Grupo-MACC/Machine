@@ -30,7 +30,6 @@ from microservice_chassis_grupo2.core.dependencies import get_db
 from sql.models import ManufacturedPiece, InflightPiece
 from sql.blacklist_database import blacklist_session
 from sql.blacklist_models import OrderBlacklistEntry
-
 logger = logging.getLogger(__name__)
 
 #region 0. HELPERS

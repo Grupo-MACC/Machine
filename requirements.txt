@@ -12,5 +12,4 @@ httpx
 PyJWT
 aio_pika
 cryptography
-microservice-chassis-grupo2==2.0.0
-asyncpg~=0.29
+microservice-chassis-grupo2-cc

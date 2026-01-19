@@ -14,25 +14,17 @@ ENV PYTHONPATH=/home/pyuser/code/app_machine
 ENV SQLALCHEMY_DATABASE_URL=sqlite+aiosqlite:///./machine.db
 ENV RABBITMQ_USER=guest
 ENV RABBITMQ_PASSWORD=guest
-ENV RABBITMQ_HOST=rabbitmq
+ENV RABBITMQ_HOST=10.0.11.30
 ENV PUBLIC_KEY_PATH=/home/pyuser/code/auth_public.pem
-ENV ORDER_SERVICE=https://order
-ENV MACHINE_SERVICE=https://machine
-ENV DELIVERY_SERVICE=https://delivery
-ENV PAYMENT_SERVICE=https://payment
-ENV AUTH_SERVICE=https://auth
 # Consul Service Discovery
-ENV CONSUL_HOST=consul
+ENV CONSUL_HOST=10.0.11.40
 ENV CONSUL_PORT=8501
+ENV SERVICE_NAME=machine
+ENV SERVICE_PORT=5001
+ENV SERVICE_ID=machine
 ENV CONSUL_SCHEME=https
 ENV CONSUL_CA_FILE=/certs/ca.pem
 ENV CONSUL_REGISTRATION_EVENT_URL=http://54.225.33.0:8081/restart
-
-ENV SERVICE_NAME=machine
-ENV SERVICE_PORT=5001
-ENV SERVICE_ID=machine-1
-ENV SERVICE_HEALTH_PATH=/${SERVICE_NAME}/health
-
 ENV SERVICE_CERT_FILE=/certs/machine/machine-cert.pem
 ENV SERVICE_KEY_FILE=/certs/machine/machine-key.pem
 

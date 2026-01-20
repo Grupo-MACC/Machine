@@ -9,9 +9,9 @@ services:
         restart: on-failure
         environment:
             - MACHINE_PIECE_TYPE=A
-            - PUBLIC_KEY_PATH=/keys/auth_public.pem # para que las dos machines usen la misma Public Key
+            - BLACKLIST_DATABASE_URL=postgresql+asyncpg://blacklist:blacklist@blacklist-db:5432/blacklist
         volumes:
-            - auth-keys:/keys
+            - ./certs:/certs:ro
         healthcheck:
             test: ["CMD", "python", "-c", "import ssl,urllib.request;ctx=ssl._create_unverified_context();urllib.request.urlopen('https://127.0.0.1:5001/machine/health', context=ctx, timeout=2)"]
             interval: 5s
@@ -28,9 +28,9 @@ services:
         restart: on-failure
         environment:
             - MACHINE_PIECE_TYPE=B
-            - PUBLIC_KEY_PATH=/keys/auth_public.pem # para que las dos machines usen la misma Public Key
+            - BLACKLIST_DATABASE_URL=postgresql+asyncpg://blacklist:blacklist@blacklist-db:5432/blacklist
         volumes:
-            - auth-keys:/keys
+            - ./certs:/certs:ro
         healthcheck:
             test: ["CMD", "python", "-c", "import ssl,urllib.request;ctx=ssl._create_unverified_context();urllib.request.urlopen('https://127.0.0.1:5001/machine/health', context=ctx, timeout=2)"]
             interval: 5s
@@ -38,19 +38,35 @@ services:
             retries: 20
     
     machine_ready:
-    image: python:3.12-slim-bookworm
-    container_name: machine-ready
-    depends_on:
-      machine_a:
-        condition: service_healthy
-      machine_b:
-        condition: service_healthy
-    ports:
-      - "8080:8080"
-    volumes:
-      - ./ready.py:/ready.py:ro
-    command: ["python", "/ready.py"]
-    restart: on-failure
+        image: python:3.12-slim-bookworm
+        container_name: machine-ready
+        depends_on:
+            - machine-a
+            - machine-b
+        ports:
+            - "8080:8080"
+        volumes:
+            - ./ready.py:/ready.py:ro
+        command: ["python", "/ready.py"]
+        restart: on-failure
+
+    
+    blacklist-db:
+        image: postgres:15-alpine
+        container_name: blacklist-db
+        environment:
+            - POSTGRES_USER=blacklist
+            - POSTGRES_PASSWORD=blacklist
+            - POSTGRES_DB=blacklist
+        volumes:
+            - blacklist-db-data:/var/lib/postgresql/data # Persistencia de datos
+        healthcheck:
+            # Healthcheck estándar de Postgres.
+            test: ["CMD-SHELL", "pg_isready -U blacklist -d blacklist"]
+            interval: 10s
+            timeout: 5s
+            retries: 5
+            start_period: 10s
 
 volumes:
-  auth-keys:
+  blacklist-db-data:

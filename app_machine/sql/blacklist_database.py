@@ -1,64 +1,42 @@
 # -*- coding: utf-8 -*-
 """
-Acceso a BD compartida de blacklist (simula futura RDS/Aurora).
-
-Configuración:
-    - Se recomienda PostgreSQL (Aurora PostgreSQL en AWS).
-    - Puedes sobreescribir la URL con la variable de entorno BLACKLIST_DATABASE_URL.
+Acceso a BD de blacklist (ahora integrada en la RDS del chassis).
 
 Nota:
-    - Por defecto apunto a un contenedor llamado 'blacklist-db' (Docker DNS).
+    - La blacklist ya NO usa una BD separada.
+    - Usa la misma conexión que el resto del microservicio (vía chassis).
+    - Esto permite sincronización entre múltiples máquinas.
 """
 
 from __future__ import annotations
 
-import os
 import logging
 from contextlib import asynccontextmanager
+from typing import AsyncGenerator
 
-from sqlalchemy.ext.asyncio import AsyncSession, async_sessionmaker, create_async_engine
+from sqlalchemy.ext.asyncio import AsyncSession
 
-from sql.blacklist_models import BlacklistBase
+from microservice_chassis_grupo2.core.dependencies import get_db
 
 logger = logging.getLogger(__name__)
 
-BLACKLIST_DATABASE_URL: str = os.getenv(
-    "BLACKLIST_DATABASE_URL",
-    "postgresql+asyncpg://blacklist:blacklist@blacklist-db:5432/blacklist",
-)
-
-engine = create_async_engine(
-    BLACKLIST_DATABASE_URL,
-    echo=False,
-    pool_pre_ping=True,
-)
-
-BlackListSessionMaker = async_sessionmaker(
-    bind=engine,
-    expire_on_commit=False,
-    class_=AsyncSession,
-)
-
-
-async def init_blacklist_db() -> None:
-    """
-    Crea tablas de la blacklist en la BD compartida.
-
-    Es idempotente: si existen, no falla.
-    """
-    logger.info("[BLACKLIST-DB] 🗄️ Creando tablas (si no existen)…")
-    async with engine.begin() as conn:
-        await conn.run_sync(BlacklistBase.metadata.create_all)
-
 
 @asynccontextmanager
-async def blacklist_session() -> AsyncSession:
+async def blacklist_session() -> AsyncGenerator[AsyncSession, None]:
     """
-    Context manager para obtener sesión contra la BD compartida.
+    Context manager para obtener sesión contra la BD (RDS compartida).
+
+    Nota:
+        - Ahora usa get_db() del chassis (misma conexión que el resto del servicio).
+        - Esto garantiza que la blacklist esté en la misma RDS.
 
     Uso:
         async with blacklist_session() as session:
             ...
     """
-    async with BlackListSessionMaker() as session:
+    agen = get_db()
+    try:
+        session = await anext(agen)
         yield session
+    finally:
+        await agen.aclose()

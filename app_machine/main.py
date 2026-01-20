@@ -8,7 +8,7 @@ import asyncio
 from fastapi import FastAPI
 from broker import machine_broker_service
 from routers import machine_router
-from sql.blacklist_database import init_blacklist_db
+from sql.blacklist_models import OrderBlacklistEntry  # Importar para que se registre en la metadata
 from microservice_chassis_grupo2.sql import database, models
 
 # Configure logging ################################################################################
@@ -34,10 +34,10 @@ async def lifespan(__app: FastAPI):
             raise e
         
         try:
-            logger.info("Creating database tables")
+            logger.info("Creating database tables (including blacklist)")
             async with database.engine.begin() as conn:
+                # Crea todas las tablas incluyendo order_blacklist (ahora en la misma RDS)
                 await conn.run_sync(models.Base.metadata.create_all)
-                await init_blacklist_db()
         except Exception:
             logger.error("Could not create tables at startup")
 
@@ -45,6 +45,8 @@ async def lifespan(__app: FastAPI):
             task_machine = asyncio.create_task(machine_broker_service.consume_do_pieces_events())
             task_cancel = asyncio.create_task(machine_broker_service.consume_cmd_machine_cancel())
             task_auth = asyncio.create_task(machine_broker_service.consume_auth_events())
+            
+            task_fetch_public_key = asyncio.create_task(machine_broker_service.fetch_auth_public_key_on_startup())
         except Exception as e:
             logger.error(f"Error lanzando payment broker service: {e}")
         

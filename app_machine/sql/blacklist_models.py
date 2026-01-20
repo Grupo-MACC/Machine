@@ -2,9 +2,10 @@
 """
 Modelos SQLAlchemy para la blacklist compartida (entre réplicas).
 
-Idea:
-    - Esta base y sus tablas NO deben mezclarse con la metadata de la DB local de Machine.
-    - Así evitamos que tablas como inflight_piece (por instancia) terminen en una DB compartida.
+Nota:
+    - Ahora usa la misma Base que el chassis (microservice_chassis_grupo2).
+    - Esto permite que la tabla order_blacklist viva en la RDS junto con las demás tablas.
+    - Ideal para escenarios multi-máquina donde se necesita una única fuente de verdad.
 """
 
 from __future__ import annotations
@@ -12,7 +13,9 @@ from __future__ import annotations
 from datetime import datetime, timezone
 
 from sqlalchemy import Integer, DateTime, Text
-from sqlalchemy.orm import DeclarativeBase, Mapped, mapped_column
+from sqlalchemy.orm import Mapped, mapped_column
+
+from microservice_chassis_grupo2.sql.models import BaseModel
 
 
 def utcnow() -> datetime:
@@ -20,18 +23,7 @@ def utcnow() -> datetime:
     return datetime.now(timezone.utc)
 
 
-class BlacklistBase(DeclarativeBase):
-    """
-    Base declarativa independiente.
-
-    Importante:
-        - Separada de la Base usada por microservice_chassis_grupo2.
-        - Esto permite tener 2 engines y 2 'metadatas' sin crear tablas cruzadas.
-    """
-    pass
-
-
-class OrderBlacklistEntry(BlacklistBase):
+class OrderBlacklistEntry(BaseModel):
     """
     Registro de order_id canceladas (blacklist compartida).
 

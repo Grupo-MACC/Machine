@@ -5,11 +5,11 @@ services:
             dockerfile: Dockerfile
         container_name: machine-a
         ports:
-            - "5000:5001"
+            - "5001:5001"
         restart: on-failure
         environment:
             - MACHINE_PIECE_TYPE=A
-            - BLACKLIST_DATABASE_URL=postgresql+asyncpg://blacklist:blacklist@blacklist-db:5432/blacklist
+            # La blacklist ahora usa la misma RDS que el chassis (SQLALCHEMY_DATABASE_URL)
         volumes:
             - ./certs:/certs:ro
         healthcheck:
@@ -24,11 +24,11 @@ services:
             dockerfile: Dockerfile
         container_name: machine-b
         ports:
-            - "5001:5001"
+            - "5002:5001"
         restart: on-failure
         environment:
             - MACHINE_PIECE_TYPE=B
-            - BLACKLIST_DATABASE_URL=postgresql+asyncpg://blacklist:blacklist@blacklist-db:5432/blacklist
+            # La blacklist ahora usa la misma RDS que el chassis (SQLALCHEMY_DATABASE_URL)
         volumes:
             - ./certs:/certs:ro
         healthcheck:
@@ -44,29 +44,15 @@ services:
             - machine-a
             - machine-b
         ports:
-            - "8080:8080"
+            - "5000:5000"
         volumes:
             - ./ready.py:/ready.py:ro
         command: ["python", "/ready.py"]
         restart: on-failure
-
-    
-    blacklist-db:
-        image: postgres:15-alpine
-        container_name: blacklist-db
-        environment:
-            - POSTGRES_USER=blacklist
-            - POSTGRES_PASSWORD=blacklist
-            - POSTGRES_DB=blacklist
-        volumes:
-            - blacklist-db-data:/var/lib/postgresql/data # Persistencia de datos
         healthcheck:
-            # Healthcheck estándar de Postgres.
-            test: ["CMD-SHELL", "pg_isready -U blacklist -d blacklist"]
-            interval: 10s
-            timeout: 5s
-            retries: 5
-            start_period: 10s
+            test: ["CMD", "python", "-c", "import urllib.request;urllib.request.urlopen('http://127.0.0.1:5000/machine/health', timeout=2)"]
+            interval: 5s
+            timeout: 3s
+            retries: 20
 
-volumes:
-  blacklist-db-data:
+    # NOTA: Se eliminó blacklist-db ya que la blacklist ahora usa la RDS del chassis

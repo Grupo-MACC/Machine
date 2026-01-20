@@ -1,11 +1,13 @@
 """
 ready.py
 
-Servidor HTTP minimo con /health para exponer "las dos machines estan arriba".
+Servidor HTTP minimo con /machine/health para exponer "las dos machines estan arriba".
 
 Comportamiento:
-- GET /health -> 200 si machine-a y machine-b responden OK a /machine/health
+- GET /machine/health -> 200 si machine-a y machine-b responden OK a /machine/health
 - En otro caso -> 503
+
+Expuesto en puerto 5000.
 """
 
 from http.server import BaseHTTPRequestHandler, HTTPServer
@@ -32,11 +34,11 @@ def _check(url: str) -> bool:
 
 
 class Handler(BaseHTTPRequestHandler):
-    """Handler minimo para /health."""
+    """Handler minimo para /machine/health."""
 
     def do_GET(self):
-        """Implementa GET /health."""
-        if self.path != "/health":
+        """Implementa GET /machine/health."""
+        if self.path != "/machine/health":
             self.send_response(404)
             self.end_headers()
             self.wfile.write(b"not found")
@@ -59,5 +61,6 @@ class Handler(BaseHTTPRequestHandler):
 
 if __name__ == "__main__":
     """Arranque del servidor."""
-    server = HTTPServer(("0.0.0.0", 8080), Handler)
+    server = HTTPServer(("0.0.0.0", 5000), Handler)
+    print("Ready server listening on port 5000...")
     server.serve_forever()

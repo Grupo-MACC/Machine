@@ -1,15 +1,16 @@
 """
 ready.py
 
-Servidor HTTP minimo con /machine/health para exponer "las dos machines estan arriba".
+Servidor HTTPS minimo con /machine/health para exponer "las dos machines estan arriba".
 
 Comportamiento:
 - GET /machine/health -> 200 si machine-a y machine-b responden OK a /machine/health
 - En otro caso -> 503
 
-Expuesto en puerto 5000.
+Expuesto en puerto 5000 (HTTPS).
 """
 
+import os
 from http.server import BaseHTTPRequestHandler, HTTPServer
 import ssl
 import urllib.request
@@ -18,6 +19,10 @@ import urllib.error
 
 MACHINE_A_URL = "https://machine-a:5001/machine/health"
 MACHINE_B_URL = "https://machine-b:5001/machine/health"
+
+# Certificados (mismos que usan las machines)
+CERT_FILE = os.getenv("SERVICE_CERT_FILE", "/certs/machine/machine-cert.pem")
+KEY_FILE = os.getenv("SERVICE_KEY_FILE", "/certs/machine/machine-key.pem")
 
 
 def _check(url: str) -> bool:
@@ -60,7 +65,13 @@ class Handler(BaseHTTPRequestHandler):
 
 
 if __name__ == "__main__":
-    """Arranque del servidor."""
+    """Arranque del servidor HTTPS."""
     server = HTTPServer(("0.0.0.0", 5000), Handler)
-    print("Ready server listening on port 5000...")
+    
+    # Envolver con SSL
+    context = ssl.SSLContext(ssl.PROTOCOL_TLS_SERVER)
+    context.load_cert_chain(certfile=CERT_FILE, keyfile=KEY_FILE)
+    server.socket = context.wrap_socket(server.socket, server_side=True)
+    
+    print(f"Ready server listening on HTTPS port 5000...")
     server.serve_forever()
